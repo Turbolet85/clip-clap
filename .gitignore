@@ -1,0 +1,7 @@
+# Claude Code
+.claude/settings.local.json
+.claude/session-handoff.md
+.claude/backup/
+
+# Andromeda planning
+.andromeda/
