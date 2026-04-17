@@ -62,7 +62,7 @@ Each gotcha follows this structure:
 
 ## go.sum drift breaks reproducible CI builds
 **What breaks:** `go mod tidy` is not idempotent across Go versions in subtle cases (e.g., transitive dependency selection). If `go.sum` differs between developer machines or between local and CI, CI fails on `git diff --exit-code go.sum`.
-**How to avoid:** Always commit the `go.sum` produced by the CI's pinned Go version (1.22). When bumping Go versions, update CI first, then re-tidy locally.
+**How to avoid:** Always commit the `go.sum` produced by the CI's pinned Go version (currently 1.23; bumped from 1.22 per security-plan). When bumping Go versions, update CI first, then re-tidy locally.
 **Fix if broken:** Run `go mod tidy` with the same Go version as CI, commit the result.
 **References:** `.andromeda/architecture.md` `[Go Module Version Pinning]`, `go.mod`, `go.sum`
 

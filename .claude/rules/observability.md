@@ -1,6 +1,6 @@
 ---
 paths:
-  - "internal/log/**"
+  - "internal/logger/**"
   - "internal/status/**"
   - "**/*_logger.go"
   - "**/*_events.go"
@@ -16,10 +16,10 @@ Path-scoped rules for logging and status-endpoint code. The project intentionall
 - **Default level:** `INFO`; `--debug` flag or `CLIP_CLAP_DEBUG=1` env var bumps to `DEBUG`
 - **Rotation:** out of scope. No internal rotation; manual rotation or external `logrotate`-equivalent if ever needed
 - **Mandatory fields per entry:** `event` (string from the enum below), `timestamp` (RFC 3339 nanosecond precision)
-- **Per-event optional fields:** see `internal/log/events.go` event enum and the per-event field list in `architecture.md` `[Structured Log Event Schema]`
+- **Per-event optional fields:** see `internal/logger/events.go` event enum and the per-event field list in `architecture.md` `[Structured Log Event Schema]`
 
 ## Event enum (verification contract)
-The complete enum lives in `internal/log/events.go`. Tests assert on these exact strings; do **not** rename or remove an event without updating both the enum and every integration test that asserts on it:
+The complete enum lives in `internal/logger/events.go`. Tests assert on these exact strings; do **not** rename or remove an event without updating both the enum and every integration test that asserts on it:
 
 - `capture.started`, `capture.completed`, `capture.failed`
 - `clipboard.swap`, `clipboard.undo`
@@ -30,7 +30,7 @@ The complete enum lives in `internal/log/events.go`. Tests assert on these exact
 - `single_instance.violation`
 
 Adding a new event:
-1. Add the constant to `internal/log/events.go`
+1. Add the constant to `internal/logger/events.go`
 2. Document the event + optional fields in `architecture.md` `[Structured Logging Keys (Verification Contract)]` AND `[Structured Log Event Schema]`
 3. Add at least one pytest assertion for the new event in `tests/integration/`
 

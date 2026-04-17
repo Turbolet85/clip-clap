@@ -49,7 +49,7 @@ Stack-tailored code reviewer installed by `/setup-project` for projects where Go
 - **Error wrapping with `fmt.Errorf("...: %w", err)`** — preserves error chain for `errors.Is`/`errors.As`
 - **Check for nil before dereferencing** — Go doesn't have Optional types, manual nil checks are required
 - **`log/slog` only** — never `fmt.Println` or `log.Printf` for production code paths; bypasses redaction discipline
-- **Event names from the enum** — every `slog` call must use a constant from `internal/log/events.go`, never a string literal
+- **Event names from the enum** — every `slog` call must use a constant from `internal/logger/events.go`, never a string literal
 
 ### Minor
 - **Struct field alignment** — reorder fields by size for smaller memory footprint
