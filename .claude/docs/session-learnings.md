@@ -8,6 +8,31 @@ _This file is entirely wrap-session's territory. `/setup-project` creates it if 
 
 ---
 
+## 2026-04-18 — Architecture.md reconciliation requires a second pass: Established Decisions drift out of sync with Stack table
+
+The first-pass architecture reconciliation on 2026-04-17 (commit `c9f0a5a`, PR #3) updated the Stack table and `[Go Module Version Pinning]` list but left `## Established Decisions` and `## Cross-cutting Patterns` with stale text that contradicted the freshly-updated tables. Specifically:
+
+1. **`[Toast Notification Library]`** still said "`stuartleeks/toast` fork as maintenance fallback" while Stack table + pinning list already said "fork NOT used per security-plan — unmaintained since 2019". A Phase-3 Gamma sub-agent reading the document end-to-end would have seen the contradiction and could have proposed re-adding the fork.
+
+2. **`[Error Handling]`** Established Decision and **`[Error Handling — Subsystem Failures]`** Cross-cutting Pattern both referenced `event=subsystem.error` as a generic placeholder. There is no such constant in `internal/logger/events.go` — the actual enumerated events are per-subsystem (`hotkey.error`, `toast.error`, `config.error`, and the Phase-3-planned `tray.flash.error` from design-system backlog).
+
+**Lesson:** surgical reconciliation of a multi-section document (`architecture.md` has ~10 top-level sections, each potentially restating stack facts) needs a second pass through the *prose* sections after the *table* sections are updated. Tables are easy to diff; prose is where duplicated-fact drift hides. A grep checklist helps:
+```bash
+grep -nE '{stale-library-name}|{stale-event-name}|{stale-version}' .andromeda/architecture.md
+```
+If the same fact is referenced in Stack table AND in an Established Decision AND in a Cross-cutting Pattern, ALL three sites need updating together.
+
+**Applies to:** every future `/andromeda-gamma` run on clip-clap, plus any scope-level reconciliation via `/andromeda-sigma`. Budget ~15 minutes for a prose-section second pass after tables are updated — it's the difference between a Phase-N+1 Gamma planning against consistent facts vs contradictory ones.
+
+**This session's specific fixes** (applied locally to gitignored `.andromeda/architecture.md`):
+- `[Toast Notification Library]`: rewrote to reflect pseudo-version pin + explicit fork rejection per security-plan
+- `[Error Handling]`: replaced generic `event=subsystem.error` with enumerated-events reference + `internal/lasterror` API mention
+- `[Error Handling — Subsystem Failures]`: same enumerated-events replacement
+
+Grep state after fixes: `stuartleeks` appears 3× all in "NOT used"/"unmaintained" anti-context; `subsystem.error` appears 1× as a prescribed anti-example ("NOT a generic `subsystem.error` placeholder") — documenting the negative pattern to prevent re-introduction by a future sub-agent that might re-derive it from Phase-0 language.
+
+---
+
 ## 2026-04-17 — `/setup-project` on mature projects: prefer surgical updates over full template regen
 
 The `/setup-project` skill regenerates `.claude/rules/*.md` and `.claude/docs/*.md` from generic templates, preserving only `## Session Additions` at the bottom. On a Phase-0 fresh setup this works well. On a Phase-N+ project where rule/doc files have accreted hand-curated content (specific commands, Phase gotchas, framework-specific patterns), full template regen DELETES that content and replaces it with shallow template stubs like `**Unit tests:** {test framework from architecture.md}`.
