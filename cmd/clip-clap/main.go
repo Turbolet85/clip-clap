@@ -3,14 +3,12 @@
 // The version flag is processed via the run() seam (testable from
 // main_test.go) before any subsystem is initialized.
 //
-// Phase 1 extends the seam with:
-//   - --debug flag parsing alongside --version
-//   - single-instance mutex (Local\ClipClapSingleInstance per security-plan)
-//   - config.Load() with auto-create-on-first-run + strict-mode TOML
-//   - logger.Initialize() with RFC 3339 nanosecond timestamps
-//   - config.loaded event emission as the first log line
-//   - signal.Notify(SIGINT, SIGTERM) block (placeholder; Phase 2 replaces
-//     with WM_CLOSE message pump for the -H windowsgui production binary)
+// Phase 2 extends the seam with:
+//   - Win32 message-only window + WndProc callback (replaces SIGINT
+//     signal block) so the tray menu's Quit can cleanly close the app
+//   - tray.RegisterIcon() — deep-ink aperture in the notification area
+//   - hotkey.Register() — Ctrl+Shift+S (or config override) bound to WM_HOTKEY
+//   - GetMessage/DispatchMessage pump that runs until WM_CLOSE → WM_QUIT
 //
 // The goversioninfo directive below produces cmd/clip-clap/resource.syso
 // at `go generate` time. Paths are relative to this file's directory
@@ -21,44 +19,76 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 
 	"github.com/Turbolet85/clip-clap/internal/config"
+	"github.com/Turbolet85/clip-clap/internal/hotkey"
+	"github.com/Turbolet85/clip-clap/internal/lasterror"
 	"github.com/Turbolet85/clip-clap/internal/logger"
+	"github.com/Turbolet85/clip-clap/internal/tray"
 )
 
 const versionString = "clip-clap v0.0.1"
 
-// mutexErr holds the result of CreateMutex between the mutex-check in Step 11
-// and the event-emission in Step 12 (cannot emit the slog event until logger
-// is initialized, so the error is deferred via this package variable).
-// Package-level scope is required; a function-local variable would not be
-// reachable from Step 12's emission path.
-var mutexErr error
+// messageClassName is the Win32 window class registered once per process.
+// Unique enough that collisions are implausible, but scoped to a single
+// atom so UnregisterClassW on teardown releases it cleanly. Must match
+// the string passed to CreateWindowExW.
+const messageClassName = "ClipClapMessageWindow"
 
-// waitForShutdown blocks until the process receives SIGINT or SIGTERM. Kept
-// as a package variable so tests can replace it with a no-op. Production
-// runs keep the default behavior; unit tests that exercise run() override
-// this to return immediately.
+// Package-level state shared between run() (startup wiring) and wndProc
+// (window-message dispatch). wndProc must be a package-level named
+// function (per design-system Step 8 — `windows.NewCallback` requires a
+// stable address for the callback's lifetime); it cannot be a closure
+// capturing run()'s locals, so these vars are the coupling point.
+var (
+	// mainHwnd holds the HWND of the message-only window created in
+	// runMessagePump. wndProc reads it for PostMessage(WM_CLOSE) and
+	// tray.ShowContextMenu dispatch.
+	mainHwnd uintptr
+
+	// mainCfg is the Phase 1 Config loaded at startup. wndProc's menu
+	// handlers (Open folder) need cfg.SaveFolder; set once in run() and
+	// never mutated after the pump starts.
+	mainCfg *config.Config
+
+	// mutexErr holds the result of CreateMutex between the mutex-check
+	// in Phase 1's Step 11 and the event-emission in Step 12 (cannot
+	// emit the slog event until logger is initialized, so the error is
+	// deferred via this package variable). Package-level scope required;
+	// a function-local variable would not be reachable from Step 12.
+	mutexErr error
+
+	// wndProcCallback is the syscall.NewCallback-wrapped WndProc. Must
+	// be set ONCE at program start (lazily, on first pump-run) because
+	// syscall.NewCallback allocates a trampoline with a stable address
+	// for the callback's lifetime. Re-wrapping in multiple pump-runs
+	// would leak trampolines.
+	wndProcCallback uintptr
+)
+
+// waitForShutdown is the hookable shutdown entry point. In production
+// (default), it runs the full Win32 message pump: create class → create
+// window → register tray icon → register hotkey → GetMessage loop until
+// WM_QUIT → teardown. Tests override this to a no-op so run() returns
+// immediately after the subsystem-init phase (Phase 1 behavior preserved).
 //
-// Phase 2 will replace this with a Win32 WM_CLOSE-driven exit path on the
-// tray message pump. For now, `go run` and console-attached smoke tests
-// terminate via Ctrl+C; the -H windowsgui production binary has no console
-// attached and relies on external taskkill/Stop-Process.
-var waitForShutdown = func() {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-}
+// Phase 2 note: this replaces the Phase 1 SIGINT/SIGTERM signal block.
+// The production binary is built with `-H windowsgui`, which detaches
+// the console — Ctrl+C has no path to reach the process. The tray menu
+// "Quit" is the canonical shutdown path; the WM_CLOSE it posts unwinds
+// the pump and teardown follows.
+var waitForShutdown = runMessagePump
 
 // run is the testable seam that main() wraps. Tests in main_test.go invoke
 // run directly with custom args + stdout buffer so --version can be exercised
@@ -119,6 +149,7 @@ func run(args []string, stdout io.Writer) int {
 		fmt.Fprintf(os.Stderr, "config load failed: %v\n", cfgErr)
 		return 1
 	}
+	mainCfg = cfg
 
 	// Step 12: resolve log level, initialize logger, emit config.loaded
 	// as the FIRST slog call. Logger.Initialize must not emit any records
@@ -156,12 +187,220 @@ func run(args []string, stdout io.Writer) int {
 	}
 	defer windows.CloseHandle(mutexHandle)
 
-	// Step 13: signal blocking (placeholder for Phase 1). Delegated to the
-	// package-level waitForShutdown variable so tests can skip the block.
+	// Phase 2: message pump (or test override). In production this creates
+	// the message-only window, registers the tray icon, binds the hotkey,
+	// and blocks on GetMessage until WM_QUIT is posted. Tests override
+	// waitForShutdown to return immediately.
 	waitForShutdown()
 	return 0
 }
 
+// runMessagePump is the production implementation of waitForShutdown. It
+// owns the full Win32 UI lifecycle: register window class → create
+// message-only window → register tray icon → register global hotkey →
+// pump messages until WM_QUIT → teardown in reverse order.
+//
+// Any Win32 failure before the pump starts is logged and returns early;
+// the process's exit code is driven by run(), which has already committed
+// to 0 by the time waitForShutdown is invoked. Logging the error to the
+// "Last error" slot is sufficient visibility — the user can open the log
+// file or see the error through the tray menu (if the tray itself came up).
+//
+// AC #5 ordering is preserved by the subsystem init sequence here:
+// (1) window → (2) tray.RegisterIcon (silent) → (3) hotkey.Register
+// (emits EventHotKeyRegistered) → (4) GetMessage loop. No other slog
+// record fires between config.loaded and hotkey.registered.
+func runMessagePump() {
+	// Install the WndProc callback once per process. windows.NewCallback
+	// allocates a trampoline that must live for the entire pump's lifetime;
+	// re-wrapping on every call would leak. Use the package-level atom.
+	if wndProcCallback == 0 {
+		wndProcCallback = windows.NewCallback(wndProc)
+	}
+
+	classNamePtr, err := windows.UTF16PtrFromString(messageClassName)
+	if err != nil {
+		slog.Error("UTF16PtrFromString(className) failed",
+			"event", logger.EventHotKeyError,
+			"error", err.Error())
+		return
+	}
+	hInstance, _, _ := tray.GetModuleHandle()
+	wc := wndClassExW{
+		CbSize:        uint32(unsafe.Sizeof(wndClassExW{})),
+		Style:         CS_HREDRAW | CS_VREDRAW,
+		LpfnWndProc:   wndProcCallback,
+		HInstance:     hInstance,
+		LpszClassName: classNamePtr,
+	}
+	classAtom, _, regErr := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
+	if classAtom == 0 {
+		slog.Error("RegisterClassExW failed",
+			"event", logger.EventHotKeyError,
+			"error", fmt.Sprintf("%v", regErr))
+		return
+	}
+	defer procUnregisterClassW.Call(uintptr(unsafe.Pointer(classNamePtr)), hInstance)
+
+	// CreateWindowExW signature:
+	//   HWND CreateWindowExW(DWORD dwExStyle, LPCWSTR lpClassName,
+	//     LPCWSTR lpWindowName, DWORD dwStyle, int X, int Y, int nWidth,
+	//     int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance,
+	//     LPVOID lpParam);
+	// Parent = HWND_MESSAGE makes it a hidden message-only window.
+	hwnd, _, createErr := procCreateWindowExW.Call(
+		uintptr(WS_EX_NOACTIVATE),
+		uintptr(unsafe.Pointer(classNamePtr)),
+		0,
+		0,
+		0, 0, 0, 0,
+		HWND_MESSAGE,
+		0,
+		hInstance,
+		0,
+	)
+	if hwnd == 0 {
+		slog.Error("CreateWindowExW failed",
+			"event", logger.EventHotKeyError,
+			"error", fmt.Sprintf("%v", createErr))
+		return
+	}
+	defer procDestroyWindow.Call(hwnd)
+	mainHwnd = hwnd
+
+	// Register tray icon. Phase 2 emits NO slog event on success/failure
+	// here — the main.go wrapper handles visibility for startup ordering
+	// (AC #5: hotkey.registered is the first event after config.loaded).
+	if err := tray.RegisterIcon(hwnd); err != nil {
+		sanitized := tray.SanitizeForTray(err)
+		lasterror.Set(sanitized)
+		slog.Error("tray registration failed",
+			"event", logger.EventHotKeyError,
+			"error", sanitized.Error())
+		// F19 tolerance: continue running without a tray icon. The hotkey
+		// may still work and the user can kill the process via Task
+		// Manager if needed.
+	}
+	defer func() {
+		if err := tray.UnregisterIcon(hwnd); err != nil {
+			slog.Error("tray unregister failed",
+				"event", logger.EventHotKeyError,
+				"error", err.Error())
+		}
+	}()
+
+	// Register the configured hotkey. hotkey.Register emits its own
+	// EventHotKeyRegistered / EventHotKeyError slog records; we do not
+	// log here to preserve AC #5's event ordering.
+	if mainCfg != nil {
+		_ = hotkey.Register(hwnd, mainCfg.Hotkey, 1)
+		// F19 tolerance: on registration failure, Register logged the
+		// error and returned non-nil; we continue running so the tray
+		// icon and menu remain usable even without an active hotkey.
+	}
+
+	// Start the background "Last error" updater (Phase 2 stub; Phase 3
+	// may expand). Safe to call — internal goroutine exits when the
+	// process dies.
+	tray.UpdateLastErrorMenu(hwnd)
+
+	// GetMessage pump. Per Win32 contract:
+	//   ret > 0 → normal message, dispatch
+	//   ret == 0 → WM_QUIT, exit the loop
+	//   ret < 0 → error; golang.org/x/sys lazy-proc Call returns this
+	//     as ret = ^uintptr(0) (i.e., -1) and a non-nil err via
+	//     GetLastError. We treat the non-zero-error case as fatal.
+	var m msg
+	for {
+		ret, _, getErr := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
+		// When ret has all bits set (int32 -1), that's GetMessage
+		// returning WinErr per the above contract. Also check getErr
+		// which lazy-proc Call populates from GetLastError.
+		if int32(ret) == -1 {
+			slog.Error("message pump failed",
+				"event", logger.EventHotKeyError,
+				"error", fmt.Sprintf("GetMessageW returned -1: %v", getErr))
+			return
+		}
+		if ret == 0 {
+			// WM_QUIT received — clean exit.
+			return
+		}
+		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
+		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
+	}
+}
+
+// wndProc is the Win32 window procedure for clip-clap's message-only
+// window. MUST be a package-level named function (not a closure) so
+// windows.NewCallback produces a stable trampoline address for the
+// lifetime of the pump. Any panic inside the dispatch is recovered,
+// sanitized, and re-panicked to the main goroutine so crashes don't
+// silently corrupt the message queue.
+func wndProc(hwnd, msgCode, wparam, lparam uintptr) (ret uintptr) {
+	defer func() {
+		if r := recover(); r != nil {
+			var err error
+			switch v := r.(type) {
+			case error:
+				err = v
+			case string:
+				err = errors.New(v)
+			default:
+				err = fmt.Errorf("%v", v)
+			}
+			sanitized := tray.SanitizeForTray(err)
+			lasterror.Set(sanitized)
+			slog.Error("wndProc panicked",
+				"event", logger.EventHotKeyError,
+				"error", sanitized.Error())
+			// Re-panic to the main goroutine so a corrupted pump surfaces
+			// loudly rather than silently swallowing the failure.
+			panic(r)
+		}
+	}()
+
+	switch uint32(msgCode) {
+	case tray.WM_HOTKEY:
+		// Phase 2 placeholder: this debug emit confirms the hotkey-press
+		// wiring end-to-end. Phase 3 replaces EventHotKeyRegistered here
+		// with a capture.* event; until then, Phase 4 pytest MUST NOT
+		// use the event constant alone to distinguish press vs. register.
+		if wparam == 1 {
+			slog.Debug("hotkey pressed",
+				"event", logger.EventHotKeyRegistered)
+		}
+		return 0
+	case tray.WM_COMMAND:
+		// Low 16 bits of wparam carry the menu item id per Win32 docs.
+		id := int(wparam & 0xFFFF)
+		tray.HandleMenuCommand(hwnd, id, mainCfg)
+		return 0
+	case tray.TrayCallback:
+		// Tray icon callback — lparam's low 16 bits carry the
+		// Win32 mouse-message value (WM_RBUTTONUP on right-click).
+		if uint32(lparam)&0xFFFF == tray.WM_RBUTTONUP {
+			tray.ShowContextMenu(hwnd)
+		}
+		return 0
+	case tray.WM_CLOSE:
+		// Graceful shutdown — post WM_QUIT so the GetMessage loop in
+		// runMessagePump returns 0 and we can run cleanup defers.
+		procPostQuitMessage.Call(0)
+		return 0
+	default:
+		r, _, _ := procDefWindowProcW.Call(hwnd, msgCode, wparam, lparam)
+		return r
+	}
+}
+
+// main wraps run() so os.Exit only fires outside test contexts. syscall
+// reference kept in imports for the windows package's transitive usage.
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout))
 }
+
+// _ keeps syscall in the import list for any future signal handling we
+// may add (Phase 3+ status-endpoint shutdown may reintroduce it). The
+// blank ref avoids the unused-import compile error while signaling intent.
+var _ = syscall.SIGINT
