@@ -8,6 +8,62 @@ _This file is entirely wrap-session's territory. `/setup-project` creates it if 
 
 ---
 
+## 2026-04-17 — `/setup-project` on mature projects: prefer surgical updates over full template regen
+
+The `/setup-project` skill regenerates `.claude/rules/*.md` and `.claude/docs/*.md` from generic templates, preserving only `## Session Additions` at the bottom. On a Phase-0 fresh setup this works well. On a Phase-N+ project where rule/doc files have accreted hand-curated content (specific commands, Phase gotchas, framework-specific patterns), full template regen DELETES that content and replaces it with shallow template stubs like `**Unit tests:** {test framework from architecture.md}`.
+
+For clip-clap specifically, `.claude/rules/testing.md` and `.claude/rules/observability.md` had rich project-specific content (UIA prerequisite notes, event-enum rules, clipboard-reentry specifics) above `## Session Additions` that would have been destroyed by a template regen. `.claude/docs/stack.md` similarly had a 70-line Core Frameworks & Libraries block with per-library rationale that the template equivalent reduces to a single placeholder line.
+
+**Working workflow when `/setup-project` is re-invoked on a mature project to sync with an updated `architecture.md`:**
+1. Read the skill's phases to understand intent.
+2. Recognize which tracked files have hand-curation above `## Session Additions` vs which are still at template-stub level.
+3. Do surgical edits (fix stale refs like `internal/log` → `internal/logger`, `Go 1.22+` → `Go 1.23+`, `Global\` → `Local\`) rather than wholesale template regen.
+4. Explain the divergence to the user in the final report and commit with a `chore:` prefix.
+
+The template regen IS the right call when the user explicitly asks for a "factory reset" of Claude config (e.g., the project pivoted languages/frameworks). Default assumption for a running project: surgical.
+
+**Applies to:** any future re-invocation of `/setup-project` on clip-clap, and the same judgement applies to future scopes created via `/andromeda-sigma`.
+
+---
+
+## 2026-04-17 — Architecture-reconciliation file checklist
+
+When `.andromeda/architecture.md` is updated to reconcile post-implementation deviations (e.g., after a phase's `/implement` produced 4+ adaptations that drifted from the plan), the following git-tracked files typically need matching surgical updates. Checklist derived from the Phase-2 reconciliation that produced 8 architecture deviations → 6 tracked-file edits → 20 inserts/18 deletes:
+
+- `CLAUDE.md` `GENERATED:setup:overview` — stack version one-liner, key-directories package list
+- `CLAUDE.md` `GENERATED:setup:architecture` — subsystem package list, architectural patterns (Win32 surface notes, etc.)
+- `CLAUDE.md` `GENERATED:setup:warnings` — mutex name, single-instance rules, critical-warning stack refs
+- `.claude/rules/*.md` — `paths:` frontmatter (for renamed packages) AND body references to specific package paths
+- `.claude/docs/stack.md` — Core Frameworks & Libraries table (versions, pseudo-versions, library fork status per security-plan)
+- `.claude/docs/gotchas.md` — Go/toolchain version pin notes, migration-specific entries
+- `.claude/agents/code-reviewer.md` — project-specific checklist rules referring to package paths or event enums
+
+`.claude/docs/session-learnings.md` is wrap-session's territory and is never touched by setup-project/reconciliation. `.claude/docs/conventions.md`, `.claude/docs/commands.md`, `.claude/docs/workflow.md` rarely need touching for version/path deviations because they're framed at a level above specific versions.
+
+**Grep one-liner to catch remaining stale refs after a reconciliation pass:**
+```bash
+grep -rnE '{stale-version}|{stale-package-path}|{stale-mutex-name}' .claude/ CLAUDE.md
+```
+
+Historical "bumped from X" / "renamed from Y" mentions are expected noise in the output; the grep's intent is to find FACTUAL stale references (text that asserts a current-but-wrong value), not NARRATIVE ones (text that documents history).
+
+**Applies to:** every future reconciliation pass on clip-clap — typically triggered after `/implement` completes a phase and produces ≥3 plan-to-code adaptations.
+
+---
+
+## 2026-04-17 — `.andromeda/` is gitignored; architecture.md edits live locally
+
+The `.andromeda/` directory (containing `architecture.md`, `design-system.md`, `security-plan.md`, `masterplan.md`, `project.yaml`, and `runs/*`) is in `.gitignore` line 7 per the "HANDOVER 2026-04-16" convention on clip-clap. Consequences:
+
+- Direct edits to `.andromeda/architecture.md` are locally effective without any commit — the file is `@`-imported from `CLAUDE.md` into every Claude Code session on this machine.
+- Those edits do NOT propagate to other machines, fresh clones, or CI — because nothing tracks them in git.
+- When you reconcile architecture deviations (e.g., after a phase's implementation drift), the authoritative fix is in `.andromeda/architecture.md` locally, but the git-tracked half (CLAUDE.md, `.claude/rules/*`, `.claude/docs/*`, `.claude/agents/*`) must be updated separately and committed via a feature branch + PR.
+- clip-clap is single-developer, so the local-vs-tracked divergence is tolerable. A multi-developer port would need to un-gitignore `.andromeda/` OR formalize the "architecture is local-only source of truth, tracked config is synced projection" workflow with a CI check.
+
+**Practical implication for wrap-session and new-session:** never assume `git status` covers architecture edits. If a session touched `.andromeda/architecture.md` and no related commit appears, that's expected — check whether the architecture delta has been propagated to tracked config (CLAUDE.md etc.) separately.
+
+---
+
 ## 2026-04-17 — Prefer `ExtractIconW` over `LoadIconW(id)` for `goversioninfo`-embedded icons
 
 `goversioninfo` v1.5.x packs `assets/app.ico` as an `RT_GROUP_ICON` resource whose name varies between library versions — neither `IDI_APPLICATION` (32512, a user32.dll sentinel) nor numeric ID 1 (the pattern documented in some goversioninfo sources) resolved for clip-clap's embedded icon. `LoadIconW(hInstance, MAKEINTRESOURCE(id))` fails with `"The specified resource type cannot be found in the image file"` even after regenerating `resource.syso` via `go generate ./cmd/clip-clap`.
