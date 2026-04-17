@@ -30,9 +30,21 @@ const versionString = "clip-clap v0.0.1"
 // second test run with "flag redefined: version").
 func run(args []string, stdout io.Writer) int {
 	fs := flag.NewFlagSet("clip-clap", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+	// Writer target for flag package output. Routing to stdout (not io.Discard)
+	// means `--help` prints the flag listing to the provided writer instead of
+	// being silently swallowed — required by /implement Final 5 scaffolding
+	// CLI smoke (`{binary} --help` must return 0 with flag listing).
+	fs.SetOutput(stdout)
 	versionFlag := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
+		// flag.ErrHelp: the user passed -h or --help. flag.Parse already
+		// printed the usage to stdout (via SetOutput above) before returning
+		// ErrHelp. We return 0 to match standard CLI convention.
+		if err == flag.ErrHelp {
+			return 0
+		}
+		// Any other parse error (unknown flag, malformed value) → exit 2.
+		// Error message was written to stdout by fs.Parse before returning.
 		return 2
 	}
 	if *versionFlag {

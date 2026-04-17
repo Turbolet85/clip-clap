@@ -37,3 +37,20 @@ func TestNoArgs_HasNoVersionOutput(t *testing.T) {
 		t.Errorf("stdout unexpectedly contains version string: %q", got)
 	}
 }
+
+// TestHelpFlag_ExitsZeroWithUsage asserts run() with --help returns 0 and
+// writes a usage block that mentions the -version flag. Required by the
+// /implement Final 5 scaffolding CLI smoke contract (`{binary} --help
+// returns 0 with expected flag listing`).
+func TestHelpFlag_ExitsZeroWithUsage(t *testing.T) {
+	var buf bytes.Buffer
+	code := run([]string{"--help"}, &buf)
+
+	if code != 0 {
+		t.Errorf("expected --help exit code 0, got %d", code)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "version") {
+		t.Errorf("--help output should list the -version flag; got: %q", out)
+	}
+}
