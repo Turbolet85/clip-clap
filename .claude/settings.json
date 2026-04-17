@@ -1,3 +1,19 @@
 {
-  "hooks": {}
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'case \"$CLAUDE_FILE_PATH\" in *.go) gofmt -w \"$CLAUDE_FILE_PATH\" ;; esac' 2>/dev/null || true"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'case \"$CLAUDE_FILE_PATH\" in *.go) command -v golangci-lint >/dev/null 2>&1 && golangci-lint run --fix \"$CLAUDE_FILE_PATH\" ;; esac' 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  }
 }

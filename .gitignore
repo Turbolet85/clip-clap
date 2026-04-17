@@ -5,3 +5,29 @@
 
 # Andromeda planning
 .andromeda/
+
+# Go build output
+bin/
+pkg/
+
+# Test binaries and output
+*.test
+*.out
+*.exe
+
+# Go workspace (keep go.work, ignore sum)
+go.work.sum
+
+# Profiling output
+*.prof
+cpu.prof
+mem.prof
+
+# Environment files
+.env
+.env.*
+
+# clip-clap runtime artifacts
+.agent-running
+logs/
+*.syso
