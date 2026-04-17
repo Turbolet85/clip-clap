@@ -8,6 +8,62 @@ _This file is entirely wrap-session's territory. `/setup-project` creates it if 
 
 ---
 
+## 2026-04-17 — Prefer `ExtractIconW` over `LoadIconW(id)` for `goversioninfo`-embedded icons
+
+`goversioninfo` v1.5.x packs `assets/app.ico` as an `RT_GROUP_ICON` resource whose name varies between library versions — neither `IDI_APPLICATION` (32512, a user32.dll sentinel) nor numeric ID 1 (the pattern documented in some goversioninfo sources) resolved for clip-clap's embedded icon. `LoadIconW(hInstance, MAKEINTRESOURCE(id))` fails with `"The specified resource type cannot be found in the image file"` even after regenerating `resource.syso` via `go generate ./cmd/clip-clap`.
+
+**Working pattern:** resolve the .exe path via `GetModuleFileNameW(moduleHandle, &buf, len(buf))`, then call `ExtractIconW(hInstance, exePath, 0)` — extracts the first icon by INDEX, agnostic to the resource-name choice. Handle return values: `0` means no icon found, `1` is an error sentinel (file not an exe/dll/ico), anything else is a valid `HICON`. Lazy-load both procs from shell32.dll (`ExtractIconW`) and kernel32.dll (`GetModuleFileNameW`) — neither is exported by `golang.org/x/sys/windows` v0.24.0.
+
+**Applies to:** any Phase 2+ clip-clap subsystem that loads the tray icon (currently `internal/tray/tray.go::RegisterIcon`) and future Phase 3 amber-flash swap when it needs to re-resolve the deep-ink icon.
+
+See: `internal/tray/tray.go::RegisterIcon` (production code), `internal/tray/win32.go` (`procExtractIconW`, `procGetModuleFileNameW` lazy loaders).
+
+---
+
+## 2026-04-17 — `golang.org/x/sys/windows` v0.24.0 omits most Win32 UI constants and procs
+
+`golang.org/x/sys/windows` v0.24.0 does NOT export the Win32 UI-surface constants or procs that clip-clap's tray/overlay/hotkey subsystems need: `MOD_ALT`/`MOD_CONTROL`/`MOD_SHIFT`/`MOD_WIN`, `VK_*` (F1–F12, SPACE, PRIOR, NEXT, HOME, END, INSERT, DELETE), `WM_CLOSE`/`WM_QUIT`/`WM_COMMAND`/`WM_HOTKEY`/`WM_RBUTTONUP`, plus `RegisterHotKey`, `Shell_NotifyIconW`, `TrackPopupMenuEx`, `CreateWindowExW`, `RegisterClassExW`, `GetMessageW`, `DispatchMessageW`, and essentially the entire user32.dll UI API.
+
+**Working pattern:** define constants locally in each package as typed `uint32` consts with the Win32-documented values, and lazy-load procs via:
+```go
+var (
+    user32 = windows.NewLazySystemDLL("user32.dll")
+    procRegisterHotKey = user32.NewProc("RegisterHotKey")
+)
+```
+Invoke via `proc.Call(arg1, arg2, ...)` which returns `(uintptr, uintptr, error)` — the first uintptr is the return value, the error is from `GetLastError`. This pattern is used across `internal/hotkey/hotkey.go`, `internal/tray/win32.go`, and `cmd/clip-clap/win32.go`.
+
+**Applies to:** every future Win32-facing package in clip-clap (overlay, clipboard Win32 open/close, toast WinRT fallback). Do NOT assume a Win32 API is exported from x/sys/windows — verify with `go doc -short golang.org/x/sys/windows {name}` first; if not found, define/lazy-load locally.
+
+See: `internal/hotkey/hotkey.go` (MOD_*/VK_* + procRegisterHotKey), `internal/tray/win32.go` (Shell_NotifyIcon + TrackPopupMenuEx surface), `cmd/clip-clap/win32.go` (window+pump surface).
+
+---
+
+## 2026-04-17 — `atomic.Value.Store` panics on heterogeneous concrete types; wrap in a single-type holder
+
+`sync/atomic.Value.Store(v)` panics with `"sync/atomic: store of inconsistently typed value into Value"` if called with different concrete types across writes — even when every value satisfies the same interface. clip-clap's `internal/lasterror` package uses `atomic.Value` as an error sink that subsystems write to from multiple goroutines; subsystems publish errors of different concrete types (`*errors.errorString` from the hotkey parser, `*os.PathError` from `exec.Command`, `*fmt.wrapError` from `fmt.Errorf("...: %w", ...)`, custom struct pointers from future subsystems, etc.), so a naive `atomic.Value.Store(err)` at the call site will panic the first time subsystem B writes an `*os.PathError` after subsystem A wrote an `*errors.errorString`.
+
+**Working pattern:** define an unexported wrapper struct with a single `error` field, and always Store that concrete type:
+```go
+type errorHolder struct { err error }
+
+var LastError atomic.Value
+
+func Set(err error) { LastError.Store(errorHolder{err: err}) }
+func Get() error {
+    v := LastError.Load()
+    if v == nil { return nil }
+    return v.(errorHolder).err
+}
+```
+All Stores now pass the same concrete type (`errorHolder`); the `err` field inside can hold any error type. `TestSet_DifferentConcreteTypes` in `internal/lasterror/lasterror_test.go` is the regression guard.
+
+**Applies to:** any `atomic.Value`-based shared-state sink where multiple code paths produce values of different concrete types satisfying a common interface — not limited to errors (could be `io.Reader`, `context.Context` variants, etc.).
+
+See: `internal/lasterror/lasterror.go::errorHolder`, `internal/lasterror/lasterror_test.go::TestSet_DifferentConcreteTypes`.
+
+---
+
 ## 2026-04-17 — Explore sub-agents reliably prepend conversational preamble; strip-and-save-raw is the pragmatic response
 
 When spawning Explore-type sub-agents via the Agent tool with strict `NO_PREAMBLE` validation (e.g., "first character of your response must be `#`", "no 'Based on my read...' or 'Perfect! I now have...'"), sub-agents still produce 2–3 lines of conversational preamble before the required template start. Observed 6+ times across a single `/andromeda-gamma` run (Phase 0 task extraction, Phase 1 research, Phase 2 draft, Phase 3 meta-prompt, Phase 3a refinement — every sub-agent invocation).
