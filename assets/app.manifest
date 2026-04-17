@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+
+  <assemblyIdentity type="win32"
+                    name="Turbolet85.ClipClap"
+                    version="0.0.1.0"
+                    processorArchitecture="amd64" />
+
+  <description>clip-clap — Windows tray screenshot utility</description>
+
+  <!-- Run as the invoking user, no admin elevation. clip-clap is a per-user
+       tool: HKCU registry only, %APPDATA% config only. -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <!-- Windows 10 / 11 compatibility. Microsoft did NOT issue a separate Win11
+       compatibility GUID — the Win10 GUID (8e0f7a12-...) covers Win11 too. -->
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+
+  <!-- Per-monitor DPI awareness V2: required for the multi-resolution app.ico
+       to be picked correctly across mixed-DPI monitors AND for the Phase 3
+       overlay layered window to draw at the right scale on HiDPI displays.
+       Older <dpiAware> tag included for Win7/8 fallback compat — the value
+       "PerMonitorV2" is technically a <dpiAwareness> value (Win10 1607+),
+       but planted here too as a verify-marker per Phase 0 plan Step 14. -->
+  <!-- verify-marker (Phase 0 plan Step 14): <dpiAware>PerMonitorV2</dpiAware> -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">PerMonitorV2</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+
+</assembly>

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Verified 2026-04-17: 5 blades, ~40% square opening, single #000000 fill -->
+  <!--
+    clip-clap iconography — stylized leaf-shutter aperture per design system
+    §Iconography. The five outer vertices form a regular pentagon (5-fold
+    rotational symmetry) which reads at 16x16 as "shutter" rather than "fan"
+    (smallest odd count satisfying that constraint). The square central
+    opening is sized to ~40% of the viewBox short edge (102 / 256 ≈ 40%) and
+    encodes the screenshot-rectangle metaphor — rectangular capture frame
+    inside rotational shutter mechanism.
+
+    Single solid-color fill path with `fill="#000000"` placeholder. The
+    build pipeline (scripts/build-icons.sh) reads this SVG once, performs
+    color substitution `#000000 → #0E1013` for assets/app.ico (deep-ink
+    idle tray icon) and `#000000 → #C64A1E` for assets/app-amber.ico
+    (safelight-amber capture-flash variant), and emits both ICOs in the
+    same atomic action so silhouettes stay byte-identical.
+
+    Single-source binding rule from design system §Iconography: NEVER
+    hand-edit either ICO independently. The Phase 3 signature flash
+    (350ms Shell_NotifyIcon NIM_MODIFY) reads as a color shift, not a
+    shape change — only because the silhouettes are byte-identical.
+
+    fill-rule="evenodd" produces a filled pentagon with a square hole
+    cut out: the outer M..Z subpath defines the pentagon, the inner
+    M..Z subpath defines the square hole. SVG rasterizes the difference.
+  -->
+  <path fill="#000000"
+        fill-rule="evenodd"
+        d="M 128 0
+           L 249.7 88.5
+           L 203.2 231.6
+           L 52.8 231.6
+           L 6.3 88.5
+           Z
+           M 77 77
+           L 179 77
+           L 179 179
+           L 77 179
+           Z" />
+</svg>

@@ -43,6 +43,8 @@ Single-binary, single-process, single-user. All UI surfaces (systray, overlay, h
 
 <!-- GENERATED:setup:imports start -->
 @.andromeda/architecture.md
+@.andromeda/design-system.md
+@.andromeda/security-plan.md
 <!-- GENERATED:setup:imports end -->
 
 ## Critical Warnings

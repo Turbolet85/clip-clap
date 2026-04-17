@@ -1,0 +1,85 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# CGO_ENABLED is enforced as 0 across the entire workflow per architecture
+# §[CGO Policy]. Any leak to 1 is detected by the explicit assertion step.
+env:
+  CGO_ENABLED: '0'
+
+jobs:
+  test-unit:
+    runs-on: windows-latest
+    steps:
+      # Sourced from https://github.com/actions/checkout/releases/tag/v4.3.1
+      # (commit SHA copied from release header). Rotate by re-querying
+      # gh api repos/actions/checkout/tags before next bump.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # SHA-pin lint runs EARLY (right after checkout, before any other
+      # action fires) so a bad pin in any workflow file aborts the job
+      # before sensitive steps. The bash form below correctly returns:
+      #   - exit 1 on violations (the && {exit 1} branch fires)
+      #   - exit 0 on a clean tree (grep no-match returns 1, but `... ||
+      #     true` is intentionally ABSENT — see security-plan §Stack-
+      #     Specific Bans for why `|| exit 0` is forbidden as a masker.
+      #     Instead we use the inverse `! grep` form to make success-on-
+      #     clean explicit while still failing on violations.)
+      - name: SHA-pinning lint (defends against future workflow files)
+        shell: bash
+        run: |
+          ! grep -rE 'uses:\s*[^@]+@(?!\b[0-9a-f]{40}\b)' .github/workflows/ \
+            || { echo 'ERROR: GitHub Actions must use 40-char commit SHA pins, not tags'; exit 1; }
+
+      # Sourced from https://github.com/actions/setup-go/releases/tag/v5.6.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.23.x'
+          cache: true
+
+      # Re-enforce CGO_ENABLED=0 inside the Go env file (in addition to the
+      # workflow env: block above) and assert it is actually 0. Architecture
+      # §[CGO Policy] forbids any CGO=1 sneak-in.
+      - name: Assert CGO_ENABLED is 0
+        shell: bash
+        run: |
+          go env -w CGO_ENABLED=0
+          [ "$(go env CGO_ENABLED)" = "0" ] \
+            || { echo 'ERROR: CGO_ENABLED must be 0'; exit 1; }
+
+      # go mod verify confirms go.sum checksums match upstream (detects
+      # tampering or corrupted module cache).
+      - name: go mod verify
+        run: go mod verify
+
+      # go mod tidy must produce no diff: catches stale or hand-edited
+      # go.mod / go.sum that weren't re-tidied before commit.
+      - name: go mod tidy is idempotent
+        shell: bash
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      # go generate runs goversioninfo to produce cmd/clip-clap/resource.syso
+      # from goversioninfo.json + assets/app.ico + assets/app.manifest.
+      - name: Install goversioninfo (build-time tool)
+        run: go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.5.0
+
+      - name: go generate
+        run: go generate ./...
+
+      # -H windowsgui hides the console window; -s -w strips symbol table
+      # and DWARF debug info to shrink the binary.
+      - name: go build (windowsgui, stripped)
+        run: go build -ldflags="-H windowsgui -s -w" -o clip-clap.exe ./cmd/clip-clap
+
+      # go test ./... -v exposes test names so the unit tests from
+      # cmd/clip-clap/main_test.go are visible in CI logs (catches the case
+      # where main_test.go is missing — `go test` would silently report
+      # "no test files" with exit 0 otherwise).
+      - name: go test
+        run: go test ./... -v

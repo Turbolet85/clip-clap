@@ -3,17 +3,19 @@
 .claude/session-handoff.md
 .claude/backup/
 
-# Andromeda planning
+# Andromeda planning (local-only artifacts; gitignored per HANDOVER 2026-04-16)
 .andromeda/
 
 # Go build output
 bin/
 pkg/
+vendor/
 
 # Test binaries and output
 *.test
 *.out
 *.exe
+clip-clap.exe
 
 # Go workspace (keep go.work, ignore sum)
 go.work.sum
@@ -23,11 +25,22 @@ go.work.sum
 cpu.prof
 mem.prof
 
-# Environment files
+# Environment / secret-class files (defense-in-depth — Phase 0 has no secrets,
+# but the .gitignore catch-all is in place BEFORE any future phase ever
+# creates such files in the working tree)
 .env
 .env.*
+*.env
+.env*
+secrets.toml
+*.key
+*.pem
+.secrets/
 
 # clip-clap runtime artifacts
 .agent-running
 logs/
 *.syso
+
+# Build-script intermediates (e.g., scripts/build-icons.sh sed temp SVGs)
+*.tmp.svg
