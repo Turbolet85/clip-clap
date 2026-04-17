@@ -6,11 +6,11 @@
 <!-- GENERATED:setup:overview start -->
 Minimalist Windows tray utility: hotkey-triggered area-select screenshot, saves PNG to a configured folder, swaps the clipboard to the auto-quoted absolute path so it can be pasted directly into a console (Windows Terminal, VS Code, WSL, SSH).
 
-**Stack:** Go 1.22+ (CGO_ENABLED=0, pure Win32 via `golang.org/x/sys/windows`), TOML config, `log/slog` JSON logs, single static `.exe` for Windows 10/11.
+**Stack:** Go 1.23+ (CGO_ENABLED=0, pure Win32 via `golang.org/x/sys/windows`), TOML config, `log/slog` JSON logs, single static `.exe` for Windows 10/11.
 
 **Key directories:**
 - `cmd/clip-clap/` — `main.go` entry point, wires subsystems
-- `internal/` — subsystem packages (tray, overlay, hotkey, capture, clipboard, toast, config, log, status)
+- `internal/` — subsystem packages (tray, overlay, hotkey, capture, clipboard, toast, config, logger, status, lasterror)
 - `tests/integration/` — pytest + pywinauto Windows UI integration tests
 - `scripts/` — `agent-run.ps1` test harness (build/start/status/logs/kill)
 - `assets/` — `app.ico`, `app.manifest` (Windows 10/11 compat, per-monitor DPI)
@@ -36,7 +36,7 @@ See `.claude/docs/commands.md` for complete command reference.
 
 ## Architecture
 <!-- GENERATED:setup:architecture start -->
-Single-binary, single-process, single-user. All UI surfaces (systray, overlay, hotkey) are direct Win32 via `golang.org/x/sys/windows` — no `lxn/walk` (frozen), no CGO. A shared Win32 message pump dispatches `WM_HOTKEY`, overlay drag events, and tray menu interactions on one UI thread. Subsystems are isolated under `internal/{tray,overlay,hotkey,capture,clipboard,toast,config,log,status}`; each runs on its own goroutine where applicable, with errors funneled through `slog` to `logs/agent-latest.jsonl`.
+Single-binary, single-process, single-user. All UI surfaces (systray, overlay, hotkey) are direct Win32 via `golang.org/x/sys/windows` — no `lxn/walk` (frozen), no CGO. A shared Win32 message pump dispatches `WM_HOTKEY`, overlay drag events, and tray menu interactions on one UI thread. Subsystems are isolated under `internal/{tray,overlay,hotkey,capture,clipboard,toast,config,logger,status,lasterror}`; each runs on its own goroutine where applicable, with errors funneled through `slog` to `logs/agent-latest.jsonl`. Win32 UI constants not exported by `x/sys/windows` v0.24.0 (`MOD_*`, `VK_*`, `WM_*`, `RegisterHotKey`, `Shell_NotifyIcon`, etc.) are defined locally per subsystem and procs are lazy-loaded via `windows.NewLazySystemDLL(...).NewProc(...)` — see architecture.md §[Win32 API Surface].
 
 **Primary source:** architecture.md (imported below).
 <!-- GENERATED:setup:architecture end -->
@@ -51,7 +51,7 @@ Single-binary, single-process, single-user. All UI surfaces (systray, overlay, h
 <!-- GENERATED:setup:warnings start -->
 - **`CGO_ENABLED=0` is mandatory** in every build. CI fails loudly if it leaks to `1`. CGO breaks cross-compilation, requires MinGW, triggers Defender false-positives on unsigned binaries.
 - **TOML config strict mode** rejects unknown keys — typos in `config.toml` cause `config.error` events at startup. Add new keys with care; deprecated keys must be removed cleanly.
-- **Single instance enforced** via Windows named mutex `Global\ClipClapSingleInstance` — a second instance exits with `single_instance.violation`. Tests must clean up the prior process before launching a new one.
+- **Single instance enforced** via Windows named mutex `Local\ClipClapSingleInstance` (per-session namespace; changed from `Global\` per security-plan) — a second instance exits with `single_instance.violation`. Tests must clean up the prior process before launching a new one.
 - **Clipboard reentry guard (500ms)** silently drops clipboard-change events from the app's own write — legitimate external clipboard activity in that window is also dropped. Documented trade-off; do not extend the window.
 - **Status endpoint is loopback-only and `--agent-mode`-gated** (default off). It is a test hook, not a product API — never expose externally, never add auth, never proxy.
 <!-- GENERATED:setup:warnings end -->

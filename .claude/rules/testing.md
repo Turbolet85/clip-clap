@@ -33,7 +33,7 @@ Path-scoped rules for test files. Loaded only when Claude is working with files 
 - **Lifecycle (per test):** `agent-run.ps1 build` → `start --agent-mode` → poll `GET http://localhost:27773/status` until `ready=true` (30s timeout) → exercise UI → assert on logs/clipboard/files → `agent-run.ps1 kill`
 - **UI driving:** `pywinauto.keyboard.send_keys("^+s")` for hotkeys; `pywinauto.mouse.press/move/release` with absolute virtual-screen coordinates for overlay drag
 - **Clipboard reads:** `win32clipboard.OpenClipboard()` + `GetClipboardData(CF_UNICODETEXT)` — never assert on byte equality of image data
-- **Log assertions:** parse `logs/agent-latest.jsonl` line-by-line; assert on `event` enum values from `internal/log/events.go`
+- **Log assertions:** parse `logs/agent-latest.jsonl` line-by-line; assert on `event` enum values from `internal/logger/events.go`
 - **Status endpoint contract:** retry on `200 + ready=false` and on connection refused; fail immediately on `503` or `404`; fail on 30s timeout
 - **PID file format:** `.agent-running` is a single decimal integer on one line — no JSON, no whitespace
 
