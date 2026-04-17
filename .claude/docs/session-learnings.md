@@ -8,6 +8,37 @@ _This file is entirely wrap-session's territory. `/setup-project` creates it if 
 
 ---
 
+## 2026-04-17 — Explore sub-agents reliably prepend conversational preamble; strip-and-save-raw is the pragmatic response
+
+When spawning Explore-type sub-agents via the Agent tool with strict `NO_PREAMBLE` validation (e.g., "first character of your response must be `#`", "no 'Based on my read...' or 'Perfect! I now have...'"), sub-agents still produce 2–3 lines of conversational preamble before the required template start. Observed 6+ times across a single `/andromeda-gamma` run (Phase 0 task extraction, Phase 1 research, Phase 2 draft, Phase 3 meta-prompt, Phase 3a refinement — every sub-agent invocation).
+
+The pragmatic orchestrator response — authorized explicitly by the user on the first occurrence and carried forward through the run:
+
+1. **Save the full raw sub-agent output** to `{run_dir}/.raw-<filename>.md` for audit. This preserves Pass 1–5 analysis, preamble, and any rationale that might be useful later but shouldn't land in the final artifact.
+2. **Manually strip the preamble** when writing the cleaned content to the final artifact (e.g., `task.md`, `research.md`, `plan-draft.md`). The post-preamble template is usually well-filled; the sub-agent's CONTENT quality is good, only its output DRESSING fails validation.
+3. **Report the residual in the orchestrator's dashboard** ("preamble stripped; raw saved to .raw-*.md") so the user sees what happened without having to read the raw file.
+4. **Do NOT halt the pipeline** on NO_PREAMBLE failure alone — the halt-after-2-failures contract is appropriate for content-quality failures (missing sections, empty AC lists) but overly strict for cosmetic preamble.
+
+This pattern applies to every Andromeda orchestrator skill that spawns sub-agents (alpha, beta, gamma, omega, epsilon, sigma). The validation framework already supports it — validation checks other than NO_PREAMBLE usually pass, and the preamble is trivially strippable.
+
+See: `.andromeda/runs/2026-04-17T14-47-51-gamma-phase-1/.raw-*.md` (seven concrete examples of the pattern and its resolution in a single run).
+
+---
+
+## 2026-04-17 — Gamma plans can contain internal contradictions between test specs and AC contracts
+
+`/andromeda-gamma` extracts test specifications (Phase 2a QA sub-agent) and step specifications (Phase 2 first-draft sub-agent) independently from different source sections — `task-tests.md` for tests, `task.md` for ACs. The two extractions are not cross-validated, so the resulting `plan-draft.md` can contain a test whose premise contradicts the AC contract the test is nominally meant to cover.
+
+**Concrete example from clip-clap Phase 1 (2026-04-17):** task-tests.md specified `TestLoad_AutoCreateOnMissingFile` with setup "set temp config path via `CLIP_CLAP_CONFIG` env var to a non-existent file... assert the file was created with default values". But task.md + AC #7 require CLIP_CLAP_CONFIG + missing-file to RETURN AN ERROR (only the DEFAULT `%APPDATA%\clip-clap\config.toml` path auto-creates on first run). The test's setup directly contradicted the AC contract.
+
+**Resolution during /implement:** trust the AC contract (architecture-level authority); adjust the test's SETUP to reach the same INTENT through the correct path. Here: redirect `AppData` and `XDG_CONFIG_HOME` env vars to a TempDir so `os.UserConfigDir()` returns the temp location, then call `Load()` without setting `CLIP_CLAP_CONFIG` — exercises the default-path auto-create that AC #1 intends. The CLIP_CLAP_CONFIG-missing case is tested separately by `TestLoad_CustomConfigMissingFile` per AC #7 (now two distinct tests for two distinct contracts).
+
+**Lesson for future `/implement` runs:** when a test spec in a plan seems to conflict with an AC it's meant to cover, **trust the AC** (architecture-level) and adjust the test setup to reach the same INTENT through the correct path. Document the adjustment in the implement-progress.md audit trail (§Adaptations / deltas from plan). If the contradiction is systemic (multiple tests misaligned), halt and ask the user before proceeding.
+
+See: `.andromeda/runs/2026-04-17T14-47-51-gamma-phase-1/implement-progress.md` §Adaptations (finding #1).
+
+---
+
 ## 2026-04-17 — Go pseudo-versions from Andromeda plans may not exist on proxy.golang.org
 
 When an Andromeda gamma plan specifies a Go module at a pseudo-version like

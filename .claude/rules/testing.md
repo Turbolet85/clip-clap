@@ -66,3 +66,5 @@ Path-scoped rules for test files. Loaded only when Claude is working with files 
 
 ## Session Additions
 _This section is owned by `/wrap-session`. setup-project preserves content added here on re-run._
+
+- 2026-04-17: `t.Cleanup` ordering gotcha on Windows — when a test opens a long-lived file handle (e.g., via `logger.Initialize`, `os.OpenFile`) AND uses `t.TempDir()`, register the close cleanup AFTER the `t.TempDir()` call. Cleanups run LIFO, so the later-registered Close runs BEFORE TempDir's RemoveAll; the opposite order leaves the handle open and RemoveAll fails with `The process cannot access the file because it is being used by another process`. Example: `tmp := t.TempDir(); t.Cleanup(func() { _ = logger.Close() })`. Applies to any `*_test.go` that opens OS resources under a `t.TempDir()`.
