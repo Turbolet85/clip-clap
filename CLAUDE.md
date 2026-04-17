@@ -80,5 +80,5 @@ For complete Andromeda documentation: `/andromeda-help`
 ## Session Learnings
 _This section is curated by `/wrap-session`. Learnings accumulated across work sessions will appear here. Do not edit directly during wrap-session runs — changes will be preserved but wrap-session appends new entries below._
 
-_No session learnings yet. Run `/wrap-session` after implementation work to capture them automatically._
+- 2026-04-17: When the user has custom `/<skill>` commands available (`/implement`, `/andromeda-*`, `/wrap-session`, etc.) for a workflow, USE them instead of rolling your own execution path — even if the plan is clear and directly executable. User values pipeline consistency and the skills encode contract details (branch strategy, progress markers, Final-N verification recipes by project type, commit-prefix rules) that hand-rolled execution silently skips. Check available skills before proceeding. (confidence 0.9)
 <!-- USER:session-learnings end -->
