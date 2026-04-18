@@ -8,6 +8,57 @@ _This file is entirely wrap-session's territory. `/setup-project` creates it if 
 
 ---
 
+## 2026-04-18 — Defer plan steps that duplicate `/implement` finalization or that publish to remote state
+
+Gamma plans sometimes include git operations as explicit steps (e.g., Phase 5 had Step 16 "Commit all Phase 5 changes to main", Step 17 "Dry-run AC #9 on a pushed feature branch + `gh workflow run`", Step 18 "`git tag v1.0.0 && git push --tags` triggers real release"). `/implement`'s Final 6–8 already handles `git add -A` + commit + feature-branch push + `gh pr create` — so Step 16 **overlaps** with the skill's built-in flow. Steps 17 and 18 affect remote/public state (pushed branches, workflow runs, a real v1.0.0 GitHub Release + Scoop manifest bump) — these are **user-triggered** post-merge actions, not implementer ones.
+
+**Working pattern during `/implement`:**
+
+1. Read the plan fully. Flag steps whose action category is `git commit`, `git push`, `git tag`, `gh release create`, `gh workflow run`, `scoop push`, or similar remote-affecting verbs.
+2. For commits/pushes: let `/implement`'s Final 6–8 handle them via feature-branch + PR. Do NOT execute them as plan steps.
+3. For tag pushes, workflow dispatches against public branches, or anything that visibly affects collaborators: **announce in the report that these are deferred to user action after PR merge**, and do NOT execute. The user can invoke them intentionally once they've reviewed the merged change.
+4. Execute the code/doc/config steps normally (file creates/modifies + Verify). Phase Verification (Final 5) exercises the ldflag + YAML structure locally without requiring the remote workflow to run.
+
+**Why:** tag pushes to `v*.*.*` trigger the actual release workflow on the first successful push — there is no "preview" or rollback. Push amplification via workflow_dispatch against a real branch publishes a workflow run attached to the repo history permanently. These side effects are too large for an orchestrator to take without user-explicit confirmation, even if the plan prescribes them.
+
+**Applies to:** every future `/implement` run on clip-clap where the gamma plan includes final-phase git/release operations. Also applies cross-project to any Andromeda gamma plan that prescribes commits, tags, pushes, or `gh` commands as steps.
+
+See: this session's Phase 5 `/implement` — Step 16 satisfied by PR #6 via Final 6–8, Steps 17–18 deferred to post-merge user action.
+
+---
+
+## 2026-04-18 — Python-based patch application is more reliable than the Edit tool for multi-line sub-agent patches with fenced code
+
+The Edit tool fails with "File has been modified since read, either by the user or by a linter" when multiple Edit calls race against linter/hook revisions — observed repeatedly in this session's gamma Iteration Loop (Phase 4) and Security Pass (Phase 2c). Additionally, sub-agent patches often contain multi-line fenced code blocks (inner ```bash, ```json, ```yaml), and the Edit tool's `old_string` must match the plan-draft.md byte-for-byte including nested fences — off-by-one whitespace or line-ending differences cause zero-match failures.
+
+**Working pattern for orchestrators applying sub-agent patches:**
+
+1. Save the sub-agent's raw output to `{run_dir}/.raw-<phase>-patches.md`.
+2. Parse patches with a regex that understands the sub-agent's `### Patch N` + `**Old:**` + fenced block + `**New:**` + fenced block structure. Outer-fence-aware parsing handles inner ` ```bash ` / ` ```json ` correctly.
+3. Write a one-off Python script at `{run_dir}/apply-<phase>.py` that does:
+   ```python
+   text = plan_file.read_text(encoding='utf-8')
+   for label, old, new in patches:
+       count = text.count(old)
+       if count == 1:
+           text = text.replace(old, new, 1)
+       else:
+           print(f"FAILED: {label} ({count} occurrences)")
+   plan_file.write_text(text, encoding='utf-8')
+   ```
+4. Run with `PYTHONIOENCODING=utf-8 python apply-<phase>.py` (Windows cp1252 default corrupts `→` / `—` / `✓` in sub-agent content — UTF-8 is mandatory).
+5. Delete the helper script after successful application; the raw patches file stays for audit.
+
+**Orphan-fence cleanup pass:** sub-agents sometimes leave an extra ` ``` ` line at the end of New content (captured inside the outer Old/New fence delimiters). A post-apply scan for fence-count parity and a second pass that removes lone ` ``` ` lines preceded by a `- bullet` and followed by blank + `### Step` header fixes this. Ran ~5 times this session successfully.
+
+**Anti-pattern:** do NOT use the Edit tool for iteration patches where the Old block is > 10 lines, contains fenced content, or has been modified by a prior Edit/hook in the same session. Favor direct Write + Python substitution.
+
+**Applies to:** every Andromeda orchestrator skill that spawns sub-agents returning patches (`/andromeda-gamma` Phases 2a/2b/2c/2d/4/5, `/andromeda-omega` iteration loop, `/andromeda-epsilon` iteration loop). The two-line `text.read_text() / patches.append / text.replace / text.write_text` loop is the standard application mechanism.
+
+See: this session's `apply-phase5.py` + `apply-iter1.py` / `apply-iter2.py` (all deleted after use; raw patches kept at `.raw-qa-patches.md`, `.raw-security-patches.md`, iteration snapshots at `iteration-N.md`).
+
+---
+
 ## 2026-04-18 — PowerShell `function kill`/`function start` silently collide with built-in aliases → cryptic "missing mandatory parameters" errors
 
 PowerShell ships two built-in aliases that shadow commonly-named user functions:
