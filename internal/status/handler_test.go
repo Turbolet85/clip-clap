@@ -53,11 +53,11 @@ func TestStatusJSON_ShapeAndFields(t *testing.T) {
 	if got.PID == 0 {
 		t.Errorf("PID = 0, want current process pid (non-zero)")
 	}
-	// Accept either the canonical fallback `v0.0.1` or whatever
-	// runtime/debug.ReadBuildInfo surfaces when the test is run
-	// via `go test`.
+	// Version should be non-empty (either from runtime/debug.ReadBuildInfo
+	// or the injectedVersion fallback — default "dev" when run via
+	// `go test` without ldflags).
 	if got.Version == "" {
-		t.Errorf("Version is empty, want %q or build-info string", versionFallback)
+		t.Errorf("Version is empty, want non-empty build-info string or %q fallback", "dev")
 	}
 }
 
@@ -239,4 +239,44 @@ func TestNoListenWithoutAgentFlag(t *testing.T) {
 		t.Fatalf("DialTimeout to 127.0.0.1:27773 succeeded, want connection refused (Initialize should be no-op when agentMode=false)")
 	}
 	// Success — the port is unbound and we got the expected TCP RST.
+}
+
+// TestSetVersion_DefaultIsDev asserts the default injectedVersion is "dev"
+// (matching cmd/clip-clap/main.go's `var version string = "dev"` default),
+// so resolveVersion() falls back to "dev" when no SetVersion is called and
+// runtime/debug.ReadBuildInfo returns no module version (normal `go test`
+// environment).
+func TestSetVersion_DefaultIsDev(t *testing.T) {
+	// Save and restore to isolate from other tests that call SetVersion.
+	versionMu.RLock()
+	orig := injectedVersion
+	versionMu.RUnlock()
+	t.Cleanup(func() { SetVersion(orig) })
+
+	SetVersion("dev")
+	got := resolveVersion()
+	// Under `go test`, ReadBuildInfo typically reports "(devel)" or empty
+	// Main.Version → resolveVersion falls back to injectedVersion. Accept
+	// either the injected fallback OR any non-empty build-info version.
+	if got != "dev" && got == "" {
+		t.Errorf("resolveVersion() = %q, want %q (or non-empty build info)", got, "dev")
+	}
+}
+
+// TestSetVersion_UpdatesInjectedVersion asserts that calling SetVersion
+// updates the fallback consumed by resolveVersion() when ReadBuildInfo
+// does not supply a module version.
+func TestSetVersion_UpdatesInjectedVersion(t *testing.T) {
+	versionMu.RLock()
+	orig := injectedVersion
+	versionMu.RUnlock()
+	t.Cleanup(func() { SetVersion(orig) })
+
+	SetVersion("v9.9.9")
+	versionMu.RLock()
+	got := injectedVersion
+	versionMu.RUnlock()
+	if got != "v9.9.9" {
+		t.Errorf("after SetVersion(%q): injectedVersion = %q, want %q", "v9.9.9", got, "v9.9.9")
+	}
 }

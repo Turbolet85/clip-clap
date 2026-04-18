@@ -47,9 +47,9 @@ func setupTestEnv(t *testing.T) string {
 }
 
 // TestVersionFlag_PrintsLiteral asserts run() with --version writes exactly
-// "clip-clap v0.0.1\n" to stdout (canonical fmt.Fprintln output) and exits 0.
-// --version returns early before any subsystem init, so this test does NOT
-// need setupTestEnv.
+// "clip-clap dev\n" to stdout (canonical fmt.Fprintf output using the "dev"
+// fallback when no ldflags are applied) and exits 0. --version returns early
+// before any subsystem init, so this test does NOT need setupTestEnv.
 func TestVersionFlag_PrintsLiteral(t *testing.T) {
 	var buf bytes.Buffer
 	code := run([]string{"--version"}, &buf)
@@ -57,7 +57,8 @@ func TestVersionFlag_PrintsLiteral(t *testing.T) {
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d", code)
 	}
-	const want = "clip-clap v0.0.1\n"
+	// Without ldflags, version defaults to "dev".
+	const want = "clip-clap dev\n"
 	if got := buf.String(); got != want {
 		t.Errorf("stdout mismatch:\n  want: %q\n  got:  %q", want, got)
 	}

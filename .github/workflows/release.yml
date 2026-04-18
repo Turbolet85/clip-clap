@@ -1,0 +1,341 @@
+name: release
+
+# Triggers:
+#   - Tag push matching `v*.*.*` (the canonical release flow, AC #1).
+#   - workflow_dispatch with optional `ref` input (AC #9 dry-run path:
+#     dispatch against a throwaway feature branch to prove that broken
+#     tests gate the `build-release` job via `needs:`).
+#
+# Required repository secrets:
+#   - SCOOP_BUCKET_TOKEN         — fine-grained PAT, contents:write scope
+#                                  on Turbolet85/scoop-bucket only, ≤90d
+#                                  expiry. Rotate before expiry (security-
+#                                  plan §Code Signing & Distribution).
+#   - AZURE_TRUSTED_SIGNING_ENDPOINT
+#                                 — optional (v1.0 unsigned path skips
+#                                  signtool when absent). Public Trust
+#                                  profile only — Private Trust does NOT
+#                                  suppress SmartScreen (security-plan
+#                                  §Code Signing & Distribution).
+#
+# SHA-pinning: ALL `uses:` statements are 40-char commit SHAs with `# vX.Y.Z`
+# trailing comments. The test.yml SHA-pinning lint defends against future
+# drift (security-plan §Stack-Specific Bans).
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to dispatch against (leave blank for default)'
+        required: false
+        type: string
+
+# CGO_ENABLED=0 enforced workflow-wide per architecture §[CGO Policy].
+env:
+  CGO_ENABLED: '0'
+
+jobs:
+  # Mirror test.yml's test-unit structure. `needs:` on build-release makes
+  # this a hard gate — AC #9 (broken test => build skipped) depends on this.
+  test-unit:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ['1.22.x', '1.23.x', '1.24.x']
+    name: test-unit (Go ${{ matrix.go-version }})
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # Propagate the dispatch ref so feature-branch dispatches check
+          # out the feature branch (AC #9 dry-run). Tag-push triggers use
+          # github.ref automatically.
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          # fetch-depth: 0 required so `git describe --tags` can resolve
+          # the tag on build-release (shallow clones omit tags).
+          fetch-depth: 0
+
+      - name: SHA-pinning lint (defends against future workflow files)
+        shell: bash
+        run: |
+          ! grep -rE 'uses:\s*[^@]+@(?!\b[0-9a-f]{40}\b)' .github/workflows/ \
+            || { echo 'ERROR: GitHub Actions must use 40-char commit SHA pins, not tags'; exit 1; }
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Assert CGO_ENABLED is 0
+        shell: bash
+        run: |
+          go env -w CGO_ENABLED=0
+          [ "$(go env CGO_ENABLED)" = "0" ] \
+            || { echo 'ERROR: CGO_ENABLED must be 0'; exit 1; }
+
+      - name: go mod verify
+        run: go mod verify
+
+      - name: go mod tidy is idempotent
+        shell: bash
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Install goversioninfo (build-time tool)
+        run: go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.5.0
+
+      - name: go generate
+        run: go generate ./...
+
+      - name: go build (windowsgui, stripped)
+        run: go build -ldflags="-H windowsgui -s -w" -o clip-clap.exe ./cmd/clip-clap
+
+      - name: go test
+        run: go test ./... -v
+
+  # Mirror test.yml's test-verification structure. Same matrix, same deps.
+  test-verification:
+    runs-on: windows-latest
+    needs: test-unit
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ['1.22.x', '1.23.x', '1.24.x']
+    name: test-verification (Go ${{ matrix.go-version }})
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Assert CGO_ENABLED is 0
+        shell: bash
+        run: |
+          go env -w CGO_ENABLED=0
+          [ "$(go env CGO_ENABLED)" = "0" ] \
+            || { echo 'ERROR: CGO_ENABLED must be 0'; exit 1; }
+
+      - name: go mod tidy is idempotent
+        shell: bash
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Install goversioninfo (build-time tool)
+        run: go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.5.0
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest + pywinauto + pywin32 + requests + psutil
+        run: pip install "pytest==8.*" "pywinauto==0.6.8" pywin32 requests psutil
+
+      - name: Build clip-clap.exe via agent-run.ps1
+        shell: pwsh
+        run: pwsh scripts/agent-run.ps1 build
+
+      - name: Run pytest integration suite (2-minute timeout)
+        shell: pwsh
+        timeout-minutes: 2
+        run: pytest tests/integration -v
+
+  # build-release runs only after both test jobs pass across the full
+  # matrix. AC #9 asserts that when test-unit fails, this job is skipped
+  # (via GitHub Actions' implicit `if: success()` combined with `needs:`).
+  build-release:
+    runs-on: windows-latest
+    needs: [test-unit, test-verification]
+    env:
+      CGO_ENABLED: '0'
+      # Pass the signing-endpoint secret into the job env so the
+      # conditional `if:` below can reference env.AZURE_TRUSTED_SIGNING_ENDPOINT.
+      # Secret values are NEVER interpolated into `run:` args — they live in
+      # `env:` blocks only (security-plan §Secret Leakage Prevention).
+      AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+    outputs:
+      binary_sha256: ${{ steps.hash.outputs.BINARY_SHA256 }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.23.x'
+          cache: true
+
+      - name: Assert CGO_ENABLED is 0
+        shell: bash
+        run: |
+          go env -w CGO_ENABLED=0
+          [ "$(go env CGO_ENABLED)" = "0" ] \
+            || { echo 'ERROR: CGO_ENABLED must be 0'; exit 1; }
+
+      - name: Install goversioninfo (build-time tool)
+        run: go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.5.0
+
+      # `go generate` runs configured generators (goversioninfo produces
+      # resource.syso from goversioninfo.json + assets/*). The template's
+      # FileVersion / ProductVersion are hardcoded per task constraints;
+      # runtime version injection happens solely via the `-X` ldflag below.
+      - name: go generate
+        run: go generate ./...
+
+      # `git describe --tags --match='v*'` enforces the v-prefix tag format
+      # (AC #5 expects `clip-clap v1.0.0`). The command fails fast when no
+      # v*-prefixed tag exists on the branch, preventing silent embedding
+      # of a commit SHA or non-prefixed tag like `1.0.0`.
+      - name: go build (release, version-injected, stripped)
+        shell: pwsh
+        run: |
+          $version = git describe --tags --match='v*'
+          if (-not $version) { throw "git describe --tags --match='v*' returned empty; no v-prefix tag on branch" }
+          Write-Host "Building with version: $version"
+          go build -ldflags="-H windowsgui -s -w -X main.version=$version" -o clip-clap.exe ./cmd/clip-clap
+          if (-not (Test-Path clip-clap.exe)) { throw "build did not produce clip-clap.exe" }
+
+      # Conditional signing. Only runs if AZURE_TRUSTED_SIGNING_ENDPOINT
+      # is configured (v1.1+ path). v1.0 skips signing and ships unsigned
+      # (per AC #11).
+      # NOTE (security-plan): provisioned trust profile MUST be
+      # Public Trust only — Private Trust does NOT suppress SmartScreen.
+      - name: Sign clip-clap.exe (Azure Trusted Signing)
+        if: env.AZURE_TRUSTED_SIGNING_ENDPOINT != ''
+        shell: pwsh
+        run: |
+          signtool sign /tr $env:AZURE_TRUSTED_SIGNING_ENDPOINT /td sha256 /fd sha256 /a clip-clap.exe
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
+
+      # SHA-256 is the Scoop manifest integrity root. This output is
+      # consumed by publish-release below.
+      - name: Compute SHA-256 of clip-clap.exe
+        id: hash
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash clip-clap.exe -Algorithm SHA256).Hash.ToLower()
+          Write-Host "SHA-256: $hash"
+          "BINARY_SHA256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Upload artifact for the publish-release job (different runner OS).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.0
+        with:
+          name: clip-clap-binary
+          path: clip-clap.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  # publish-release: creates the GitHub Release and rewrites the Scoop
+  # manifest in Turbolet85/scoop-bucket. Runs on ubuntu-latest because
+  # `gh release create` + git operations are faster there; PowerShell is
+  # available via pwsh for the JSON rewrite step.
+  publish-release:
+    runs-on: ubuntu-latest
+    needs: build-release
+    # Only publish on actual tag push; workflow_dispatch dry-runs are
+    # meant to test the test-gate, not publish releases.
+    if: startsWith(github.ref, 'refs/tags/v')
+    env:
+      # SCOOP_BUCKET_TOKEN expires in ≤90 days; rotate before expiry.
+      SCOOP_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BINARY_SHA256: ${{ needs.build-release.outputs.binary_sha256 }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      # Download the signed (or unsigned) binary produced by build-release.
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: clip-clap-binary
+          path: dist
+
+      - name: Create GitHub Release from CHANGELOG.md
+        shell: bash
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file CHANGELOG.md \
+            dist/clip-clap.exe
+
+      # Checkout the Scoop bucket repo with the fine-grained PAT
+      # (contents:write on Turbolet85/scoop-bucket only). Deploy keys are
+      # forbidden (security-plan §Stack-Specific Bans).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: Turbolet85/scoop-bucket
+          token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          path: scoop-bucket
+
+      # Rewrite bucket/clip-clap.json: update `version`, `url`, and `hash`
+      # in both the top-level object and `architecture.64bit`. Preserves
+      # UTF-8 BOM-less encoding and original field order.
+      - name: Rewrite Scoop manifest
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $manifestPath = "scoop-bucket/bucket/clip-clap.json"
+          $tag = $env:RELEASE_TAG
+          $versionNumeric = $tag -replace '^v', ''
+          $hash = "sha256:" + $env:BINARY_SHA256
+          $url = "https://github.com/${env:GITHUB_REPOSITORY}/releases/download/$tag/clip-clap.exe"
+
+          Write-Host "Tag: $tag"
+          Write-Host "Version: $versionNumeric"
+          Write-Host "URL: $url"
+          # Do NOT echo $hash or credentials — the hash is public but the
+          # echo discipline applies uniformly (security-plan §Error Logging
+          # Hygiene).
+
+          $text = Get-Content $manifestPath -Raw -Encoding UTF8
+          # Manual string-replace preserves field order and indentation
+          # (ConvertTo-Json reorders keys non-deterministically).
+          $text = [regex]::Replace($text, '("version"\s*:\s*)"[^"]*"', "`$1`"$versionNumeric`"")
+          $text = [regex]::Replace($text, '("url"\s*:\s*)"[^"]*"', "`$1`"$url`"")
+          $text = [regex]::Replace($text, '("hash"\s*:\s*)"[^"]*"', "`$1`"$hash`"")
+
+          # Pre-publish validation: no placeholder hash, exact SHA-256
+          # format required (security-plan §Dimension 6/7).
+          if ($text -match 'placeholder|abc123|"hash"\s*:\s*"sha256:0{64}"') {
+            throw "FATAL: placeholder hash detected in manifest — substitution failed"
+          }
+          if ($text -notmatch '"hash"\s*:\s*"sha256:[a-f0-9]{64}"') {
+            throw "FATAL: manifest hash does not match sha256:[a-f0-9]{64} pattern"
+          }
+
+          # Write back as UTF-8 WITHOUT BOM (Scoop tooling expects this).
+          [System.IO.File]::WriteAllText(
+            (Resolve-Path $manifestPath),
+            $text,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          Write-Host "Manifest rewritten successfully."
+
+      - name: Commit + push Scoop manifest update
+        shell: bash
+        working-directory: scoop-bucket
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/clip-clap.json
+          if git diff --cached --quiet; then
+            echo "Manifest unchanged; skipping commit."
+            exit 0
+          fi
+          git commit -m "clip-clap: update to ${GITHUB_REF_NAME}"
+          git push origin HEAD
