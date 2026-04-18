@@ -20,4 +20,11 @@ const (
 	EventConfigLoaded            = "config.loaded"
 	EventConfigError             = "config.error"
 	EventSingleInstanceViolation = "single_instance.violation"
+	// EventAgentDisabled is emitted when the agent would otherwise
+	// respond to an environment-driven configuration (e.g., a future
+	// CLIP_CLAP_AGENT_PORT) but --agent-mode is not set. Reserved for
+	// Phase 4+ multi-port / alternative-port scenarios; Phase 4 itself
+	// emits no events with this constant (the CLIP_CLAP_AGENT_PORT
+	// check was dropped in Phase 5 validation as out-of-scope).
+	EventAgentDisabled = "agent.disabled"
 )
