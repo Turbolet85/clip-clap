@@ -111,6 +111,18 @@ type POINT struct {
 	Y int32
 }
 
+// MSG — Win32 MSG struct consumed by GetMessageW / TranslateMessage /
+// DispatchMessageW. Used by the overlay's private message pump inside
+// CreateOverlay. LPrivate field is omitted — user code never reads it.
+type MSG struct {
+	HWnd    uintptr
+	Message uint32
+	WParam  uintptr
+	LParam  uintptr
+	Time    uint32
+	Pt      POINT
+}
+
 // SIZE — GDI width+height struct.
 type SIZE struct {
 	CX int32

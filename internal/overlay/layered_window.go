@@ -154,7 +154,30 @@ func CreateOverlay(captureCallback func(image.Rectangle)) error {
 		go runInstructionalMicroBar(ov)
 	}
 
-	return nil
+	// Overlay's OWN GetMessage/DispatchMessage pump on the caller's OS
+	// thread. Win32 routes window messages to the thread that created
+	// the window — the main runMessagePump loop reads from its own
+	// thread's queue and WILL NOT see overlay events. This blocks until
+	// destroyOverlay posts WM_QUIT (via PostQuitMessage) on
+	// WM_LBUTTONUP (capture done) or WM_KEYDOWN+VK_ESCAPE (cancel).
+	//
+	// Caller (cmd/clip-clap/runCaptureFlow) is expected to pin the
+	// goroutine to an OS thread via runtime.LockOSThread before calling
+	// CreateOverlay — CreateWindowExW + this pump + RegisterClassExW
+	// all require consistent thread affinity.
+	var m MSG
+	for {
+		ret, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
+		if int32(ret) == -1 {
+			return fmt.Errorf("overlay: GetMessageW returned -1")
+		}
+		if ret == 0 {
+			// WM_QUIT received — clean exit from destroyOverlay.
+			return nil
+		}
+		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
+		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
+	}
 }
 
 // ensureClassRegistered registers the overlay window class exactly once per
@@ -604,6 +627,13 @@ func destroyOverlay(ov *overlay) {
 	if ov.memDC != 0 {
 		procDeleteDC.Call(ov.memDC)
 	}
+
+	// Break CreateOverlay's GetMessage pump so the caller (runCaptureFlow
+	// on its locked goroutine) can return and release the OS thread.
+	// PostQuitMessage posts WM_QUIT to the CURRENT thread's queue —
+	// which is the same thread as the overlay pump because destroyOverlay
+	// is only ever called from wndProcOverlay on the pumping thread.
+	procPostQuitMessage.Call(0)
 }
 
 // getSystemMetric wraps GetSystemMetrics with standard signed-int32 return
