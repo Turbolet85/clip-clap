@@ -40,7 +40,7 @@ function build {
     Write-Host "Built: clip-clap.exe ($(Get-Item clip-clap.exe).Length bytes)"
 }
 
-function start {
+function startAgent {
     if (-not (Test-Path './clip-clap.exe')) {
         throw "clip-clap.exe not found — run 'agent-run.ps1 build' first"
     }
@@ -86,7 +86,7 @@ function logs {
     }
 }
 
-function kill {
+function killAgent {
     if (-not (Test-Path '.agent-running')) {
         Write-Host "No .agent-running PID file"
         return
@@ -98,22 +98,57 @@ function kill {
         return
     }
     $procId = [int]$pidStr
-    Write-Host "Killing PID $procId..."
-    try {
-        Stop-Process -Id $procId -Force -ErrorAction Stop
-        Remove-Item '.agent-running' -Force
-        Write-Host "Killed PID $procId"
-    } catch {
-        Write-Host "Process $procId not found or already gone: $($_.Exception.Message)"
+
+    # Look up the process. If already gone, clean up the PID file and return.
+    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+    if ($null -eq $proc) {
+        Write-Host "Process $procId not found (already exited); removing stale PID file"
         Remove-Item '.agent-running' -Force -ErrorAction SilentlyContinue
+        return
     }
+
+    # Stage 1: graceful close via `taskkill /PID` (no /F). Docs:
+    # taskkill without /F sends a WM_CLOSE message to the process's
+    # top-level windows. Clip-clap's wndProc on the HWND_MESSAGE window
+    # is registered at that level, so the WM_CLOSE reaches it and
+    # triggers status.Shutdown → PostQuitMessage → clean exit.
+    #
+    # We use taskkill instead of CloseMainWindow because the latter
+    # only targets windows with WS_VISIBLE style in the current desktop
+    # — tray/message-only apps return false from CloseMainWindow even
+    # though they CAN receive WM_CLOSE.
+    Write-Host "Sending WM_CLOSE to PID $procId..."
+    & taskkill /PID $procId | Out-Null
+
+    # Stage 2: wait up to 3 seconds for the process to exit gracefully.
+    # Shorter than the 5s AC budget so the fallback path still fits
+    # within 5s total (3s wait + up to 2s for taskkill /F + reap).
+    if ($proc.WaitForExit(3000)) {
+        Remove-Item '.agent-running' -Force -ErrorAction SilentlyContinue
+        Write-Host "PID $procId exited gracefully"
+        return
+    }
+
+    # Stage 3: graceful path timed out — emit the fallback message to
+    # stderr (per plan §Step 9 Security note; test_agent_run_ps1_kill_falls_back_to_taskkill
+    # asserts on this literal) and force-kill via taskkill /F.
+    [Console]::Error.WriteLine("falling back to taskkill /PID $procId /F")
+    & taskkill /PID $procId /F | Out-Null
+    # Give the OS a moment to reap the process before cleanup.
+    Start-Sleep -Milliseconds 500
+
+    # Cleanup: PID file removal is idempotent (tolerates file already gone —
+    # e.g., if the Go process itself removed it via status.Shutdown's
+    # pidfile.DeletePIDFile call before we got here).
+    Remove-Item '.agent-running' -Force -ErrorAction SilentlyContinue
+    Write-Host "PID $procId is gone"
 }
 
 # Dispatch
 switch ($Cmd) {
     'build'  { build }
-    'start'  { start }
+    'start'  { startAgent }
     'status' { status }
     'logs'   { logs }
-    'kill'   { kill }
+    'kill'   { killAgent }
 }

@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,6 +28,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -40,6 +43,7 @@ import (
 	"github.com/Turbolet85/clip-clap/internal/lasterror"
 	"github.com/Turbolet85/clip-clap/internal/logger"
 	"github.com/Turbolet85/clip-clap/internal/overlay"
+	"github.com/Turbolet85/clip-clap/internal/status"
 	"github.com/Turbolet85/clip-clap/internal/toast"
 	"github.com/Turbolet85/clip-clap/internal/tray"
 )
@@ -81,6 +85,14 @@ var (
 	// for the callback's lifetime. Re-wrapping in multiple pump-runs
 	// would leak trampolines.
 	wndProcCallback uintptr
+
+	// unkillableHookActive gates the WM_CLOSE-swallowing hook used by
+	// the test harness's taskkill-fallback exercise. Double-gated: the
+	// --unkillable-debug flag must be parseable (debug build tag) AND
+	// `CLIP_CLAP_TEST_UNKILLABLE=1` env var must be set before this
+	// atomic flips to true. Release builds never see the flag, so the
+	// hook is physically unreachable on production binaries.
+	unkillableHookActive atomic.Bool
 )
 
 // waitForShutdown is the hookable shutdown entry point. In production
@@ -113,6 +125,22 @@ func run(args []string, stdout io.Writer) int {
 	fs.SetOutput(stdout)
 	versionFlag := fs.Bool("version", false, "print version and exit")
 	debugFlag := fs.Bool("debug", false, "enable debug-level logging")
+	agentModeFlag := fs.Bool("agent-mode", false, "enable HTTP status endpoint on 127.0.0.1:27773 (test-only)")
+
+	// --unkillable-debug is only registered on debug builds. On release
+	// builds, unkillableDebugEnabled is false (from unkillable_release.go),
+	// so fs.Bool is never called and passing --unkillable-debug triggers
+	// "flag provided but not defined" — the security-plan §Input Validation
+	// enforcement boundary.
+	var unkillableDebugFlag *bool
+	if unkillableDebugEnabled {
+		unkillableDebugFlag = fs.Bool(
+			"unkillable-debug",
+			false,
+			"register WM_CLOSE handler that refuses to close (test only; requires CLIP_CLAP_TEST_UNKILLABLE=1)",
+		)
+	}
+
 	if err := fs.Parse(args); err != nil {
 		// flag.ErrHelp: the user passed -h or --help. flag.Parse already
 		// printed the usage to stdout (via SetOutput above) before returning
@@ -192,6 +220,52 @@ func run(args []string, stdout io.Writer) int {
 		return 1
 	}
 	defer windows.CloseHandle(mutexHandle)
+
+	// Phase 4: read CLIP_CLAP_TEST_READY_DELAY_MS env var (test-only
+	// escape hatch for exercising the false→true ready-flag edge).
+	// Absent → 0. Unparseable → slog.Warn with EventConfigError and
+	// treat as 0 (non-fatal; production behavior preserved). This uses
+	// EventConfigError, NOT EventAgentDisabled — the failure is a
+	// config-parse error, not an agent-mode state decision.
+	readyDelayMs := 0
+	if raw := os.Getenv("CLIP_CLAP_TEST_READY_DELAY_MS"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil {
+			// Redact the raw value to at most 32 chars to avoid log-
+			// flooding if the user set a huge string.
+			shortRaw := raw
+			if len(shortRaw) > 32 {
+				shortRaw = shortRaw[:32] + "…"
+			}
+			slog.Warn("CLIP_CLAP_TEST_READY_DELAY_MS parse failed",
+				"event", logger.EventConfigError,
+				"reason", "CLIP_CLAP_TEST_READY_DELAY_MS parse failed",
+				"value", shortRaw)
+		} else {
+			readyDelayMs = parsed
+		}
+	}
+
+	// Phase 4: activate the unkillable-debug hook iff BOTH the flag is
+	// true AND the env var is set. Double-gate per security-plan §Input
+	// Validation — either alone must not activate the hook.
+	if unkillableDebugFlag != nil && *unkillableDebugFlag &&
+		os.Getenv("CLIP_CLAP_TEST_UNKILLABLE") == "1" {
+		unkillableHookActive.Store(true)
+	}
+
+	// Phase 4: spawn the status.Initialize goroutine BEFORE invoking
+	// the blocking message pump. Running concurrently means the HTTP
+	// listener binds and the PID file is written while the pump
+	// processes hotkey/tray/overlay messages. If --agent-mode is
+	// false, Initialize is a no-op (returns nil without binding).
+	go func() {
+		if err := status.Initialize(*agentModeFlag, time.Duration(readyDelayMs)*time.Millisecond); err != nil {
+			slog.Error("status server init failed",
+				"event", logger.EventHotKeyError,
+				"error", err.Error())
+		}
+	}()
 
 	// Phase 2: message pump (or test override). In production this creates
 	// the message-only window, registers the tray icon, binds the hotkey,
@@ -414,6 +488,23 @@ func wndProc(hwnd, msgCode, wparam, lparam uintptr) (ret uintptr) {
 		}
 		return 0
 	case tray.WM_CLOSE:
+		// Phase 4 unkillable-debug hook: if the double-gated test flag
+		// is active (debug build + CLIP_CLAP_TEST_UNKILLABLE=1), swallow
+		// WM_CLOSE without posting WM_QUIT — simulates a hung process
+		// so the test harness can exercise the taskkill fallback path
+		// in scripts/agent-run.ps1 (test_agent_run_ps1_kill_falls_back_to_taskkill).
+		if unkillableHookActive.Load() {
+			return 0
+		}
+
+		// Phase 4: gracefully shut down the status server before
+		// posting WM_QUIT. Shutdown() is idempotent (safe no-op when
+		// --agent-mode wasn't set) and bounded by a 2s deadline so
+		// slow in-flight requests don't freeze the message pump.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = status.Shutdown(ctx)
+
 		// Graceful shutdown — post WM_QUIT so the GetMessage loop in
 		// runMessagePump returns 0 and we can run cleanup defers.
 		procPostQuitMessage.Call(0)

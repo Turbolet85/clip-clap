@@ -44,3 +44,4 @@ logs/
 
 # Build-script intermediates (e.g., scripts/build-icons.sh sed temp SVGs)
 *.tmp.svg
+tmp-smoke/

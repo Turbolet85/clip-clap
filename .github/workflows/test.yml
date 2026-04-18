@@ -14,6 +14,11 @@ env:
 jobs:
   test-unit:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ['1.22.x', '1.23.x', '1.24.x']
+    name: test-unit (Go ${{ matrix.go-version }})
     steps:
       # Sourced from https://github.com/actions/checkout/releases/tag/v4.3.1
       # (commit SHA copied from release header). Rotate by re-querying
@@ -38,7 +43,7 @@ jobs:
       # Sourced from https://github.com/actions/setup-go/releases/tag/v5.6.0
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.23.x'
+          go-version: ${{ matrix.go-version }}
           cache: true
 
       # Re-enforce CGO_ENABLED=0 inside the Go env file (in addition to the
@@ -83,3 +88,63 @@ jobs:
       # "no test files" with exit 0 otherwise).
       - name: go test
         run: go test ./... -v
+
+  # test-verification — Phase 4 pytest + pywinauto integration suite.
+  # Depends on test-unit (waits for ALL matrix entries to pass); declares
+  # its own identical matrix because GitHub Actions does NOT share matrix
+  # values across needs:-dependent jobs.
+  test-verification:
+    runs-on: windows-latest
+    needs: test-unit
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ['1.22.x', '1.23.x', '1.24.x']
+    name: test-verification (Go ${{ matrix.go-version }})
+    env:
+      # Double-enforce CGO_ENABLED=0 at the job level (the workflow's
+      # top-level env: already sets this, but we re-assert here for
+      # robustness against future env overrides).
+      CGO_ENABLED: '0'
+    steps:
+      # Pin: actions/checkout@v4.3.1
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # Pin: actions/setup-go@v5.6.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Assert CGO_ENABLED is 0
+        shell: bash
+        run: |
+          go env -w CGO_ENABLED=0
+          [ "$(go env CGO_ENABLED)" = "0" ] \
+            || { echo 'ERROR: CGO_ENABLED must be 0'; exit 1; }
+
+      - name: go mod tidy is idempotent
+        shell: bash
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Install goversioninfo (build-time tool)
+        run: go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.5.0
+
+      # Pin: actions/setup-python@v5.3.0
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest + pywinauto + pywin32 + requests + psutil
+        run: pip install "pytest==8.*" "pywinauto==0.6.8" pywin32 requests psutil
+
+      - name: Build clip-clap.exe via agent-run.ps1
+        shell: pwsh
+        run: pwsh scripts/agent-run.ps1 build
+
+      - name: Run pytest integration suite (2-minute timeout)
+        shell: pwsh
+        timeout-minutes: 2
+        run: pytest tests/integration -v
