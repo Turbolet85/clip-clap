@@ -228,15 +228,16 @@ func ShowContextMenu(hwnd uintptr) {
 	}
 	defer procDestroyMenu.Call(hMenu)
 
+	// v1.0.7 menu layout — minimal, only the entries user actually uses.
+	// Removed (code path preserved for ID stability, see menu_ids.go):
+	//   - Settings (edit config.toml) — was always grayed, replaced below
+	//     by functional "Edit hotkey" that opens the same file
+	//   - Undo last capture — user feedback: never used in practice
+	//   - Last error: <none> — removed with v1.0.6 flash removal; every
+	//     capture used to set lasterror to a flash-error message
 	appendMenu(hMenu, MenuIDCapture, MF_STRING, "Expose\tCtrl+Shift+S")
 	appendMenu(hMenu, MenuIDOpenFolder, MF_STRING, "Open folder")
-	appendMenu(hMenu, MenuIDSettings, MF_STRING|MF_GRAYED, "Settings (edit config.toml)")
-	undoFlags := uint32(MF_STRING | MF_GRAYED)
-	if hasSnapshotFunc != nil && hasSnapshotFunc() {
-		undoFlags = MF_STRING // enable the entry when an Undo snapshot is available
-	}
-	appendMenu(hMenu, MenuIDUndoLastCapture, undoFlags, "Undo last capture")
-	appendMenu(hMenu, MenuIDLastError, MF_STRING|MF_GRAYED, FormatLastErrorMenuLabel(SanitizeForTray(lasterror.Get())))
+	appendMenu(hMenu, MenuIDEditHotkey, MF_STRING, "Edit hotkey (restart to apply)")
 	appendMenu(hMenu, MenuIDQuit, MF_STRING, "Quit")
 
 	// Win32 requires SetForegroundWindow before TrackPopupMenuEx or the
@@ -355,13 +356,15 @@ func HandleMenuCommand(hwnd uintptr, id int, cfg *config.Config) bool {
 	case MenuIDOpenFolder:
 		openFolder(cfg)
 		return true
+	case MenuIDEditHotkey:
+		openConfigFile()
+		return true
 	case MenuIDQuit:
 		procPostMessageW.Call(hwnd, uintptr(WM_CLOSE), 0, 0)
 		return true
 	case MenuIDSettings, MenuIDLastError:
-		// Grayed / read-only slots — Win32 won't normally fire WM_COMMAND
-		// for MF_GRAYED items, but defense-in-depth against spoofed
-		// messages from a hostile process.
+		// Legacy IDs — v1.0.7 removed these from the visible menu but kept
+		// the cases for defense-in-depth against stray WM_COMMAND messages.
 		return true
 	default:
 		return false
@@ -390,4 +393,51 @@ func openFolder(cfg *config.Config) {
 	}
 	slog.Info("tray menu opened",
 		"event", logger.EventTrayMenuOpened)
+}
+
+// openConfigFile opens config.toml in the user's default associated
+// editor (Notepad if nothing else is registered). Used by the
+// MenuIDEditHotkey handler so the user can edit the `hotkey` key without
+// remembering the APPDATA path. Restart is required for the new hotkey
+// to apply — the menu label says so explicitly.
+//
+// Uses `cmd /C start "" <path>` so Windows File Explorer's ShellExecute
+// picks the user's file association (VS Code, Sublime, Notepad++, etc.)
+// rather than forcing Notepad. The empty title argument `""` after
+// `start` prevents cmd from interpreting the path as a window title.
+func openConfigFile() {
+	configPath := resolveConfigPath()
+	if configPath == "" {
+		slog.Error("tray edit-hotkey: cannot resolve config path",
+			"event", logger.EventTrayMenuOpened,
+			"error", "os.UserConfigDir returned empty")
+		return
+	}
+	cmd := exec.Command("cmd", "/C", "start", "", configPath)
+	if err := cmd.Start(); err != nil {
+		sanitized := SanitizeForTray(err)
+		lasterror.Set(sanitized)
+		slog.Error("tray edit-hotkey failed",
+			"event", logger.EventTrayMenuOpened,
+			"error", sanitized.Error())
+		return
+	}
+	slog.Info("tray edit-hotkey opened",
+		"event", logger.EventTrayMenuOpened,
+		"config_path", filepath.Base(configPath))
+}
+
+// resolveConfigPath returns the absolute path to the user's config.toml
+// or empty string on failure. Mirrors the resolution logic used by
+// internal/config/config.Load but without reading or parsing the file —
+// we only need the location so the editor can open it.
+func resolveConfigPath() string {
+	if v := os.Getenv("CLIP_CLAP_CONFIG"); v != "" {
+		return v
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "clip-clap", "config.toml")
 }

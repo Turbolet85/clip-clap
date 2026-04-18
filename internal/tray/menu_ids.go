@@ -13,10 +13,11 @@ package tray
 const (
 	MenuIDCapture         = 1 // "Expose\tCtrl+Shift+S" — darkroom verb for the capture action (NOT "Capture")
 	MenuIDOpenFolder      = 2 // "Open folder" — explorer.exe to cfg.SaveFolder
-	MenuIDSettings        = 3 // "Settings (edit config.toml)" — grayed (MFS_DISABLED)
+	MenuIDSettings        = 3 // [v1.0.7 removed from visible menu] was "Settings (edit config.toml)" grayed
 	MenuIDQuit            = 4 // "Quit" — posts WM_CLOSE to the message pump
-	MenuIDUndoLastCapture = 5 // "Undo last capture" — grayed until Phase 3 wires it
-	MenuIDLastError       = 6 // "Last error: <none>" — grayed display slot
+	MenuIDUndoLastCapture = 5 // [v1.0.7 removed from visible menu] was "Undo last capture"
+	MenuIDLastError       = 6 // [v1.0.7 removed from visible menu] was "Last error: <none>"
+	MenuIDEditHotkey      = 7 // "Edit hotkey (restart to apply)" — opens config.toml in default editor
 )
 
 // MenuIDToName returns a human-readable identifier for logging and tests.
@@ -37,6 +38,8 @@ func MenuIDToName(id int) string {
 		return "undo_last_capture"
 	case MenuIDLastError:
 		return "last_error"
+	case MenuIDEditHotkey:
+		return "edit_hotkey"
 	default:
 		return "unknown"
 	}

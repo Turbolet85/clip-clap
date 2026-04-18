@@ -24,6 +24,7 @@ func TestMenuIDMapping(t *testing.T) {
 		{"MenuIDQuit", MenuIDQuit, 4},
 		{"MenuIDUndoLastCapture", MenuIDUndoLastCapture, 5},
 		{"MenuIDLastError", MenuIDLastError, 6},
+		{"MenuIDEditHotkey", MenuIDEditHotkey, 7},
 	}
 	seen := map[int]string{}
 	for _, c := range cases {
@@ -56,6 +57,7 @@ func TestMenuIDToName_KnownIDs(t *testing.T) {
 		{MenuIDQuit, "quit"},
 		{MenuIDUndoLastCapture, "undo_last_capture"},
 		{MenuIDLastError, "last_error"},
+		{MenuIDEditHotkey, "edit_hotkey"},
 		{999, "unknown"},
 	}
 	for _, c := range cases {
