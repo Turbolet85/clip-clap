@@ -24,10 +24,12 @@ The complete enum lives in `internal/logger/events.go`. Tests assert on these ex
 - `capture.started`, `capture.completed`, `capture.failed`
 - `clipboard.swap`, `clipboard.undo`
 - `toast.shown`, `toast.error`
+- `tray.flash.error` — 350ms safelight-amber capture flash failed (non-fatal)
 - `hotkey.registered`, `hotkey.error`
 - `tray.menu.opened`
 - `config.loaded`, `config.error`
 - `single_instance.violation`
+- `agent.disabled` — reserved; emitted when env-driven agent config is set but `--agent-mode` absent (not emitted in Phase 4, reserved for Phase 5+)
 
 Adding a new event:
 1. Add the constant to `internal/logger/events.go`
