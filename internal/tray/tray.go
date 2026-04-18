@@ -46,6 +46,31 @@ var iconState struct {
 // fine because clip-clap only ever registers one tray icon per process.
 const trayUID uint32 = 1
 
+// Handler function pointers — set by main.go via SetHandlers to wire tray
+// menu actions to the capture pipeline without introducing an import cycle
+// (tray cannot import clipboard because clipboard imports tray.SanitizeForTray).
+//
+// captureHandler is invoked when the user clicks the "Expose" menu item
+// (identical to a hotkey press — same pipeline in main.go).
+// undoHandler is invoked when the user clicks "Undo last capture".
+// hasSnapshotFunc is queried when building the context menu to decide
+// whether "Undo last capture" is enabled or grayed.
+var (
+	captureHandler  func()
+	undoHandler     func()
+	hasSnapshotFunc func() bool
+)
+
+// SetHandlers wires the tray menu actions to their implementations. Pass
+// nil for any handler that is not yet available (menu item is grayed).
+// Called once from main.go after all subsystems are ready, before the
+// message pump starts. Safe to call again during tests.
+func SetHandlers(capture, undo func(), hasSnapshot func() bool) {
+	captureHandler = capture
+	undoHandler = undo
+	hasSnapshotFunc = hasSnapshot
+}
+
 // SanitizeForTray unwraps error types that embed a filesystem path
 // (*os.PathError, *os.LinkError, *fs.PathError, or any error wrapping
 // one via errors.As) and replaces the .Path with filepath.Base(Path).
@@ -206,7 +231,11 @@ func ShowContextMenu(hwnd uintptr) {
 	appendMenu(hMenu, MenuIDCapture, MF_STRING, "Expose\tCtrl+Shift+S")
 	appendMenu(hMenu, MenuIDOpenFolder, MF_STRING, "Open folder")
 	appendMenu(hMenu, MenuIDSettings, MF_STRING|MF_GRAYED, "Settings (edit config.toml)")
-	appendMenu(hMenu, MenuIDUndoLastCapture, MF_STRING|MF_GRAYED, "Undo last capture")
+	undoFlags := uint32(MF_STRING | MF_GRAYED)
+	if hasSnapshotFunc != nil && hasSnapshotFunc() {
+		undoFlags = MF_STRING // enable the entry when an Undo snapshot is available
+	}
+	appendMenu(hMenu, MenuIDUndoLastCapture, undoFlags, "Undo last capture")
 	appendMenu(hMenu, MenuIDLastError, MF_STRING|MF_GRAYED, FormatLastErrorMenuLabel(SanitizeForTray(lasterror.Get())))
 	appendMenu(hMenu, MenuIDQuit, MF_STRING, "Quit")
 
@@ -304,13 +333,24 @@ func UpdateLastErrorMenu(hwnd uintptr) {
 func HandleMenuCommand(hwnd uintptr, id int, cfg *config.Config) bool {
 	switch id {
 	case MenuIDCapture:
-		// Stub for Phase 3 — emit a debug event so the wiring is visible
-		// in logs without committing to a future event constant. Reuses
-		// EventTrayMenuOpened as a placeholder; Phase 3 introduces a
-		// dedicated capture.* event constant.
-		slog.Debug("tray menu capture clicked",
-			"event", logger.EventTrayMenuOpened,
-			"source", "tray_menu")
+		// Invoke the capture pipeline handler wired by main.go (same flow
+		// as a Ctrl+Shift+S hotkey press). The handler runs asynchronously
+		// on a background goroutine so this WndProc dispatch returns
+		// quickly and the tray menu closes without blocking.
+		if captureHandler != nil {
+			go captureHandler()
+		} else {
+			slog.Debug("tray menu capture clicked (no handler registered)",
+				"event", logger.EventTrayMenuOpened,
+				"source", "tray_menu")
+		}
+		return true
+	case MenuIDUndoLastCapture:
+		// Invoke the Undo handler wired by main.go. Runs asynchronously so
+		// the dispatch returns promptly.
+		if undoHandler != nil {
+			go undoHandler()
+		}
 		return true
 	case MenuIDOpenFolder:
 		openFolder(cfg)
@@ -318,7 +358,7 @@ func HandleMenuCommand(hwnd uintptr, id int, cfg *config.Config) bool {
 	case MenuIDQuit:
 		procPostMessageW.Call(hwnd, uintptr(WM_CLOSE), 0, 0)
 		return true
-	case MenuIDSettings, MenuIDUndoLastCapture, MenuIDLastError:
+	case MenuIDSettings, MenuIDLastError:
 		// Grayed / read-only slots — Win32 won't normally fire WM_COMMAND
 		// for MF_GRAYED items, but defense-in-depth against spoofed
 		// messages from a hostile process.
