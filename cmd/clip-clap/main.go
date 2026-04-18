@@ -48,7 +48,8 @@ import (
 	"github.com/Turbolet85/clip-clap/internal/tray"
 )
 
-const versionString = "clip-clap v0.0.1"
+// version is overridable via -X main.version=<value> at build time; falls back to "dev" if unset. The ldflag value MUST include the "v" prefix (e.g., "v1.0.0") to match the release tag format.
+var version string = "dev"
 
 // messageClassName is the Win32 window class registered once per process.
 // Unique enough that collisions are implausible, but scoped to a single
@@ -153,7 +154,7 @@ func run(args []string, stdout io.Writer) int {
 		return 2
 	}
 	if *versionFlag {
-		fmt.Fprintln(stdout, versionString)
+		fmt.Fprintf(stdout, "clip-clap %s\n", version)
 		return 0
 	}
 
@@ -253,6 +254,12 @@ func run(args []string, stdout io.Writer) int {
 		os.Getenv("CLIP_CLAP_TEST_UNKILLABLE") == "1" {
 		unkillableHookActive.Store(true)
 	}
+
+	// Phase 5: inject the ldflag-driven version into the status package
+	// BEFORE Initialize() spawns any goroutines that might read it. The
+	// SetVersion call uses a sync.RWMutex internally so a subsequent
+	// concurrent read from the HTTP handler is race-safe.
+	status.SetVersion(version)
 
 	// Phase 4: spawn the status.Initialize goroutine BEFORE invoking
 	// the blocking message pump. Running concurrently means the HTTP

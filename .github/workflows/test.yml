@@ -61,6 +61,17 @@ jobs:
       - name: go mod verify
         run: go mod verify
 
+      # Vulnerability scan — warning-only per security-plan §Dependency
+      # Security (minimal tier). continue-on-error: true enforces the
+      # warning-only contract so a flagged vuln does NOT block release.
+      # Govulncheck only flags REACHABLE vulns (call-graph analysis).
+      # Pin review cadence: re-check SHA ≤ 90 days.
+      - name: Check for vulnerabilities (govulncheck)
+        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee # v1.0.4
+        with:
+          go-version-file: 'go.mod'
+        continue-on-error: true
+
       # go mod tidy must produce no diff: catches stale or hand-edited
       # go.mod / go.sum that weren't re-tidied before commit.
       - name: go mod tidy is idempotent

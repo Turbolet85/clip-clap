@@ -48,11 +48,29 @@ var allowedHosts = map[string]struct{}{
 	"localhost:27773": {},
 }
 
-// versionFallback is returned in the JSON response when
-// runtime/debug.ReadBuildInfo() cannot determine the module version
-// (e.g., running via `go run` or in tests). Matches the versionString
-// in cmd/clip-clap/main.go for consistency.
-const versionFallback = "v0.0.1"
+// injectedVersion is the version string reported by /status when
+// runtime/debug.ReadBuildInfo() cannot resolve a module version
+// (`go run`, tests, dev builds). Defaults to "dev" and is overridden
+// by SetVersion() from main.run() on startup — the release build's
+// ldflag `-X main.version=v1.0.0` flows through main.version into
+// this var.
+//
+// SetVersion is called from main.run() to inject the ldflag-driven
+// version before status endpoint initialization. Read/write access to
+// injectedVersion is synchronized via versionMu to prevent data races
+// if goroutines are spawned before SetVersion() completes.
+var (
+	injectedVersion = "dev"
+	versionMu       sync.RWMutex
+)
+
+// SetVersion updates the fallback version reported by the /status
+// endpoint. Safe for concurrent use.
+func SetVersion(v string) {
+	versionMu.Lock()
+	defer versionMu.Unlock()
+	injectedVersion = v
+}
 
 // Package-level server state. Initialized once (per process) by
 // Initialize; cleared by Shutdown. All mutation is guarded by srvMu.
@@ -269,13 +287,14 @@ func buildMiddleware(mux *http.ServeMux) http.Handler {
 }
 
 // resolveVersion returns the module version from build info, or the
-// hard-coded fallback if ReadBuildInfo fails (e.g., `go run` without
-// a tagged build).
+// injectedVersion fallback set by main.run() (default "dev").
 func resolveVersion() string {
 	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
 		return bi.Main.Version
 	}
-	return versionFallback
+	versionMu.RLock()
+	defer versionMu.RUnlock()
+	return injectedVersion
 }
 
 // processPID is a seam for tests — production always returns
