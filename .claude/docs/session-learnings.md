@@ -8,6 +8,72 @@ _This file is entirely wrap-session's territory. `/setup-project` creates it if 
 
 ---
 
+## 2026-04-18 — PowerShell `function kill`/`function start` silently collide with built-in aliases → cryptic "missing mandatory parameters" errors
+
+PowerShell ships two built-in aliases that shadow commonly-named user functions:
+
+- `kill` → `Stop-Process` (requires `-Id` or `-InputObject` or `-Name`)
+- `start` → `Start-Process` (requires `-FilePath`)
+
+When a script defines `function kill { ... }` AND dispatches it by bare name inside a `switch` / `if` block (e.g., `'kill' { kill }`), PowerShell's alias-vs-function resolution can unexpectedly dispatch to the alias, not the user function. The symptom is a cryptic `agent-run.ps1: Cannot process command because of one or more missing mandatory parameters: Id.` / `...FilePath.` error from the alias target — with NO stack trace pointing to the real function. The user's `Write-Host` at the top of `function kill` never executes, so there's no easy diagnostic breadcrumb.
+
+**Working fix:** rename to non-colliding names: `killAgent`, `startAgent`. Update the switch dispatcher accordingly. The fix is trivial once identified; the diagnostic pain is entirely in detection.
+
+**Why is this not always observed?** PowerShell's resolution order depends on scope, how the script was sourced, and whether the function was defined before or after the alias. In clip-clap's Phase 3 harness, the scripts APPEARED to work during initial smoke-testing because the dispatcher was invoked via `-Command { kill }` from an interactive session where aliases were resolved differently. Phase 4 re-exercising the harness via `pwsh scripts/agent-run.ps1 kill` as a standalone script invocation is what surfaced the collision.
+
+**Applies to:** any `.ps1` script in clip-clap's `scripts/` directory. Future scripts (e.g., Phase 5 release pipeline, any CI helper) MUST avoid: `kill`, `start`, `stop`, `select`, `sort`, `group`, `where`, `foreach`, `echo`, `cd`, `gc`, `iwr`, `sc`, `type`, `rm`, `cp`, `mv`, `ls`, `cat`, `ps`, `gp`, `sp`. Prefer project-specific verb+noun names like `killAgent`, `startAgent`, `buildBinary`.
+
+Grep to detect the anti-pattern before commit:
+```bash
+grep -nE '^function (kill|start|stop|select|sort|group|where|foreach|echo|cd|gc|iwr|sc|type|rm|cp|mv|ls|cat|ps|gp|sp)\b' scripts/*.ps1
+```
+
+See: `scripts/agent-run.ps1::killAgent` (historical: was `function kill`), `scripts/agent-run.ps1::startAgent` (historical: was `function start`).
+
+---
+
+## 2026-04-18 — Stray background processes from prior sessions hold Windows named mutexes → break mutex-dependent Go tests in the next session
+
+clip-clap's single-instance guard is a named `Local\ClipClapSingleInstance` mutex created in `cmd/clip-clap/main.go::run()`. Go unit tests `TestDebugFlag_ExitsZero` + `TestDebugFlag_ResolvesToLevelDebug` exercise the full `run()` path (including mutex creation). If a stray `clip-clap.exe` from a prior session's smoke test is still running, it holds the mutex; the test's `windows.CreateMutex` returns `ERROR_ALREADY_EXISTS`, `run()` takes the "another instance is already running" exit path (code 1), and the test fails with `run with --debug should exit 0; got 1`.
+
+The stray process is invisible to `git status`, doesn't show in any open-editor listing, and the named mutex itself is not enumerable. The symptom (test returns 1 instead of 0) gives no hint about process residue — it's easy to misattribute the failure to something just-changed in `run()` (the thing that was just edited).
+
+**Detection:** `powershell -Command "Get-Process clip-clap -ErrorAction SilentlyContinue"` lists any live instances with PID + process name. Zero output means no residue; non-zero PID is the culprit.
+
+**Resolution:** `powershell -Command "Stop-Process -Id <pid> -Force"` kills the stray. Tests go green immediately.
+
+**Prevention for future sessions:**
+1. `/wrap-session` should ideally emit a warning if `Get-Process clip-clap` returns any live instance at wrap time (signal that the prior smoke test didn't clean up).
+2. `scripts/agent-run.ps1 kill` + its `taskkill` fallback path (added in Phase 4) is the canonical cleanup — always call at end of smoke testing.
+3. A pre-test Go helper that calls `taskkill /IM clip-clap.exe /F` would be belt-and-suspenders, but adding OS-specific cleanup to `go test` is overkill for a solo-dev project. Ad-hoc manual cleanup via the PowerShell snippet above is the current pattern.
+
+**Applies to:** any Go test in clip-clap that exercises `run()` (i.e., goes through mutex creation). Currently: `cmd/clip-clap/main_test.go::TestDebugFlag_ExitsZero`, `TestDebugFlag_ResolvesToLevelDebug`. Future Phase 5 tests exercising `run()` will have the same vulnerability.
+
+See: `cmd/clip-clap/main.go::run` (mutex creation), `cmd/clip-clap/main_test.go::setupTestEnv` (tests that go through the mutex path).
+
+---
+
+## 2026-04-18 — `taskkill /PID` (no `/F`) is a better graceful-kill primitive than `$proc.CloseMainWindow()` for HWND_MESSAGE / tray-only Win32 apps
+
+PowerShell's `Process.CloseMainWindow()` only targets windows with a visible top-level main window. clip-clap's message pump uses `HWND_MESSAGE` parent — a hidden, message-only window that is NOT a top-level window — so `$proc.CloseMainWindow()` returns `false` and the process receives no WM_CLOSE. Result: the graceful-shutdown path (status.Shutdown → PostQuitMessage) never fires, and the `WaitForExit(5000)` times out, forcing the taskkill fallback for every kill (always 5+ seconds per kill).
+
+**Working alternative:** `taskkill /PID $procId` (WITHOUT `/F`) sends WM_CLOSE to **all** top-level windows of the process, including message-only windows registered via `CreateWindowExW(HWND_MESSAGE, ...)`. clip-clap's wndProc receives the WM_CLOSE and runs the full graceful-shutdown flow. Observed latency: ~500ms end-to-end (vs. 5000ms for the CloseMainWindow-timeout path).
+
+**Two-stage kill pattern (Phase 4 `scripts/agent-run.ps1::killAgent`):**
+1. `taskkill /PID $procId` — sends WM_CLOSE, app handles gracefully
+2. `$proc.WaitForExit(3000)` — 3-second budget for graceful exit
+3. On timeout: emit `falling back to taskkill /PID <pid> /F` to stderr, invoke `taskkill /PID $procId /F`, wait 500ms
+
+Total worst-case budget: ~3.5 seconds (well under the 5-second AC contract for `agent-run.ps1 kill`). Best-case: ~500ms.
+
+**Why not `$proc.Kill()`?** That's equivalent to `taskkill /F` — force-terminate without giving the app a chance to run deferred cleanup (status.Shutdown drain, PID-file delete, etc.). Graceful-first is correct for the test harness because the app's shutdown codepaths are under test.
+
+**Applies to:** any Win32 app in clip-clap that uses `HWND_MESSAGE` (the current message pump, any future background worker that registers a message-only window). Avoid `CloseMainWindow()` in PowerShell cleanup scripts; prefer `taskkill /PID` → wait → `taskkill /PID /F` fallback.
+
+See: `scripts/agent-run.ps1::killAgent` (the two-stage kill implementation), `cmd/clip-clap/main.go::runMessagePump` (HWND_MESSAGE creation), `cmd/clip-clap/main.go::wndProc` WM_CLOSE handler (graceful-exit flow).
+
+---
+
 ## 2026-04-18 — Use `RtlMoveMemory` for Win32 HGLOBAL / pointer-to-kernel-memory copies to avoid go vet `unsafeptr` warnings
 
 `go vet` flags `(*T)(unsafe.Pointer(uintptr))` conversions as "possible misuse of unsafe.Pointer" because Go's GC may move managed pointers mid-expression (invalidating the uintptr). For Win32 code this is a false positive — `HGLOBAL` memory from `GlobalAlloc` + `GlobalLock` lives in the Win32 kernel heap, NEVER moves, and the uintptr-returning lazy-proc `Call()` pattern is the canonical way to receive it. But vet cannot tell the difference, and `go vet ./...` returns exit 1.
