@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync/atomic"
 	"syscall"
@@ -298,6 +299,17 @@ func run(args []string, stdout io.Writer) int {
 // (emits EventHotKeyRegistered) → (4) GetMessage loop. No other slog
 // record fires between config.loaded and hotkey.registered.
 func runMessagePump() {
+	// Win32 thread-affinity requirement: CreateWindowExW + RegisterHotKey +
+	// GetMessage MUST run on the same OS thread, otherwise RegisterHotKey
+	// fails with ERROR_WINDOW_OF_OTHER_THREAD ("Invalid window; it belongs
+	// to other thread"). Go's scheduler can freely migrate goroutines
+	// between OS threads, so we lock this goroutine to its current OS
+	// thread for the pump's entire lifetime. UnlockOSThread on return
+	// releases it (defensive — the goroutine typically exits after pump
+	// teardown anyway).
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	// Install the WndProc callback once per process. windows.NewCallback
 	// allocates a trampoline that must live for the entire pump's lifetime;
 	// re-wrapping on every call would leak. Use the package-level atom.
