@@ -8,6 +8,75 @@ _This file is entirely wrap-session's territory. `/setup-project` creates it if 
 
 ---
 
+## 2026-04-18 — Use `RtlMoveMemory` for Win32 HGLOBAL / pointer-to-kernel-memory copies to avoid go vet `unsafeptr` warnings
+
+`go vet` flags `(*T)(unsafe.Pointer(uintptr))` conversions as "possible misuse of unsafe.Pointer" because Go's GC may move managed pointers mid-expression (invalidating the uintptr). For Win32 code this is a false positive — `HGLOBAL` memory from `GlobalAlloc` + `GlobalLock` lives in the Win32 kernel heap, NEVER moves, and the uintptr-returning lazy-proc `Call()` pattern is the canonical way to receive it. But vet cannot tell the difference, and `go vet ./...` returns exit 1.
+
+**Working pattern:** route the buffer copy through `RtlMoveMemory` (kernel32's memcpy primitive). The vet-approved pattern is `uintptr(unsafe.Pointer(&goSlice[0]))` — taking the address of a Go-managed slice IS safe and vet accepts it. By passing the HGLOBAL uintptr as-is (no type cast) and the Go-slice address via `uintptr(unsafe.Pointer(...))`, both directions of the copy stay within vet's allowed idioms:
+
+```go
+procRtlMoveMemory := kernel32.NewProc("RtlMoveMemory")
+
+// HGLOBAL → Go slice (read)
+snap := make([]uint16, n)
+procRtlMoveMemory.Call(
+    uintptr(unsafe.Pointer(&snap[0])),  // vet-approved: addr of Go slice
+    locked,                              // uintptr from GlobalLock: no cast
+    uintptr(n*2),
+)
+
+// Go slice → HGLOBAL (write)
+withTerm := append(payload, 0)
+procRtlMoveMemory.Call(
+    dst,                                 // uintptr from GlobalLock: no cast
+    uintptr(unsafe.Pointer(&withTerm[0])),
+    uintptr(len(withTerm)*2),
+)
+```
+
+The anti-pattern that fails vet: `unsafe.Slice((*uint16)(unsafe.Pointer(dst)), n)` — this is the direct-cast approach that would be ergonomic in non-vet-guarded contexts but triggers the warning. Phase 3 `internal/clipboard/clipboard.go` initially used this and `go vet` exited 1; refactored to RtlMoveMemory and vet went clean.
+
+**Applies to:** any future Win32-heap pointer manipulation in clip-clap (future `internal/overlay` DIB pixel reads, `internal/clipboard` image-format clipboard writes, etc.). Also applies to memory obtained from `GlobalLock`, `VirtualAlloc`, `HeapAlloc`, `LocalAlloc` — basically anything that returns a uintptr representing non-Go-managed OS memory.
+
+---
+
+## 2026-04-18 — Function-pointer injection breaks subsystem import cycles without a shared-types refactor
+
+Phase 3 `internal/tray` needed to query `clipboard.HasSnapshot()` (to enable/disable the "Undo last capture" menu item) AND invoke `clipboard.Undo()` (on menu click). But `internal/clipboard` already imports `internal/tray.SanitizeForTray` (to sanitize `*os.PathError` before setting lasterror). Direct import in either direction creates a cycle.
+
+**Working pattern:** tray package exposes package-level function-pointer vars that main.go wires at startup via a `tray.SetHandlers(capture, undo func(), hasSnapshot func() bool)` entry point. No import of clipboard in tray; no import cycle. main.go (which already imports both) wires the closures:
+
+```go
+// internal/tray/tray.go
+var (
+    captureHandler  func()
+    undoHandler     func()
+    hasSnapshotFunc func() bool
+)
+
+func SetHandlers(capture, undo func(), hasSnapshot func() bool) {
+    captureHandler = capture
+    undoHandler = undo
+    hasSnapshotFunc = hasSnapshot
+}
+
+// cmd/clip-clap/main.go startup:
+tray.SetHandlers(
+    func() { runCaptureFlow(hwnd) },
+    func() { runUndoFlow(hwnd) },
+    clipboard.HasSnapshot,
+)
+```
+
+**Alternatives considered (and rejected):**
+- Move `SanitizeForTray` out of `internal/tray` into a shared `internal/errs` package — viable but adds a package for one function. Function-pointer pattern preserves the single-purpose `internal/tray` boundary.
+- Make clipboard self-sanitize (skip the tray helper) — ugly duplication if other subsystems grow to use the same helper.
+- Replace function pointers with an interface `type TrayHandlers interface { Capture(); Undo(); HasSnapshot() bool }` — more Go-idiomatic but heavier for 3 methods.
+
+**Applies to:** any future clip-clap subsystem that needs cross-subsystem orchestration where imports would form a cycle (e.g., `internal/status` endpoint needing to trigger `internal/capture` for a synthetic capture in agent-mode — same pattern: status exposes a handler pointer, main.go wires it).
+
+---
+
 ## 2026-04-18 — Architecture.md reconciliation requires a second pass: Established Decisions drift out of sync with Stack table
 
 The first-pass architecture reconciliation on 2026-04-17 (commit `c9f0a5a`, PR #3) updated the Stack table and `[Go Module Version Pinning]` list but left `## Established Decisions` and `## Cross-cutting Patterns` with stale text that contradicted the freshly-updated tables. Specifically:
