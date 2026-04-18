@@ -193,12 +193,19 @@ func ensureClassRegistered() error {
 	hInstance, _, _ := procGetModuleHandleW.Call(0)
 	classNamePtr, _ := syscall.UTF16PtrFromString(OverlayClassName)
 
+	// LoadCursorW(NULL, IDC_CROSS) loads the standard system crosshair —
+	// idiomatic for area-select overlays. Without setting HCursor here,
+	// Win32 falls back to IDC_APPSTARTING (the spinning "busy" ring) when
+	// the overlay window appears, which looks like the app is loading.
+	hCursor, _, _ := procLoadCursorW.Call(0, IDC_CROSS)
+
 	wc := WNDCLASSEXW{
 		CbSize:        WNDCLASSEXWSize(),
 		Style:         0,
 		LpfnWndProc:   wndProcCallback,
 		HInstance:     hInstance,
 		LpszClassName: classNamePtr,
+		HCursor:       hCursor,
 	}
 	ret, _, err := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 	if ret == 0 {

@@ -105,6 +105,11 @@ type BLENDFUNCTION struct {
 	AlphaFormat         byte
 }
 
+// IDC_CROSS is the Win32 resource ID for the crosshair system cursor —
+// idiomatic for area-select overlays (Snipping Tool, CleanShot X use it).
+// Passed to LoadCursorW with a NULL hInstance to load from user32.dll.
+const IDC_CROSS uintptr = 32515
+
 // POINT — GDI 2D point.
 type POINT struct {
 	X int32
@@ -186,6 +191,7 @@ var (
 	procGetMessageW      = user32.NewProc("GetMessageW")
 	procTranslateMessage = user32.NewProc("TranslateMessage")
 	procDispatchMessageW = user32.NewProc("DispatchMessageW")
+	procLoadCursorW      = user32.NewProc("LoadCursorW")
 
 	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
 	procDeleteDC           = gdi32.NewProc("DeleteDC")
