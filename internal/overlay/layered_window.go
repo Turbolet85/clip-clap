@@ -433,12 +433,14 @@ func runFadeIn(ov *overlay) {
 		eased := 1.0 - math.Pow(1.0-t, 3)
 		alpha := byte(math.Round(float64(targetAlpha) * eased))
 		dragRect, _ := CurrentRect()
-		// Absolute coordinates for carveDragRect: CurrentRect returns
-		// overlay-local virtual-screen coords → convert to absolute by
-		// adding virtualX/Y.
-		if !dragRect.Empty() {
-			dragRect = dragRect.Add(image.Pt(int(ov.virtualX), int(ov.virtualY)))
-		}
+		// CurrentRect returns absolute virtual-screen coords (drag_handler
+		// stores the absolute x/y fed in by wndProcOverlay, which already
+		// adds virtualX/Y to lparam client coords). renderDIB expects
+		// absolute coords and converts to overlay-local internally by
+		// subtracting virtualX/Y. Previously this branch added virtualX/Y
+		// a SECOND time — v1.0.3 field-caught bug where a primary-on-right
+		// / secondary-on-left dual-monitor setup (virtualX = -1920) shifted
+		// the drawn rectangle to the wrong monitor.
 		renderDIB(ov, dragRect, alpha)
 		time.Sleep(duration / frames)
 	}
@@ -568,8 +570,13 @@ func wndProcOverlay(hwnd, msg, wparam, lparam uintptr) uintptr {
 		y := int32(int16(uint16((lparam>>16)&0xFFFF))) + ov.virtualY
 		HandleMouseMove(x, y)
 		if dragRect, active := CurrentRect(); active {
-			abs := dragRect.Add(image.Pt(int(ov.virtualX), int(ov.virtualY)))
-			renderDIB(ov, abs, ov.currentAlpha)
+			// dragRect is already absolute (see HandleLButtonDown which
+			// stores the virtualX/Y-offset value fed in by this handler).
+			// renderDIB subtracts virtualX/Y internally for overlay-local
+			// pixel coordinates. Prior code added virtualX/Y a second time
+			// here, breaking drag-rect rendering on dual-monitor setups
+			// with negative virtualX (primary on right).
+			renderDIB(ov, dragRect, ov.currentAlpha)
 		}
 		return 0
 	case WM_LBUTTONUP:
