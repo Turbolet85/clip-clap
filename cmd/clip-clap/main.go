@@ -577,15 +577,27 @@ func runCaptureFlow(hwnd uintptr) {
 			return
 		}
 
-		// Toast notification (non-fatal — tray flash is primary receipt).
+		// Toast notification — primary receipt, visible in the notification
+		// area with the captured filename.
 		_ = toast.Show(absPath, captureID, mainCfg.SaveFolder)
 
 		// Update tray tooltip to "Last: <filename>".
 		filename := filepath.Base(absPath)
 		_ = tray.UpdateTooltipAfterCapture(hwnd, filename)
 
-		// Fire the signature 350ms safelight-amber flash.
-		_ = tray.Flash(hwnd)
+		// v1.0.6 field decision: the design-system-specified 350ms
+		// safelight-amber tray flash is REMOVED from the runtime path.
+		// Rationale: the flash occupies the same screen region (notification
+		// area) and time window (~350ms) as the Windows toast, which
+		// occludes the tray icon entirely. The flash is never visible to
+		// the user in practice, and its only side effect on every capture
+		// was an ERROR log line (`tray.flash.error`) from the missing
+		// amber ICO embedding. Toast provides the same "capture done"
+		// signal with more information (filename + "Show" action).
+		//
+		// `internal/tray/flash.go` is kept intact for potential v1.1
+		// re-integration if toast+flash coordination is ever designed
+		// (e.g., flash-then-toast sequencing).
 	})
 	if err != nil {
 		sanitized := tray.SanitizeForTray(err)
