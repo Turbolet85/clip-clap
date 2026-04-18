@@ -22,19 +22,25 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"image"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 
+	"github.com/Turbolet85/clip-clap/internal/capture"
+	"github.com/Turbolet85/clip-clap/internal/clipboard"
 	"github.com/Turbolet85/clip-clap/internal/config"
 	"github.com/Turbolet85/clip-clap/internal/hotkey"
 	"github.com/Turbolet85/clip-clap/internal/lasterror"
 	"github.com/Turbolet85/clip-clap/internal/logger"
+	"github.com/Turbolet85/clip-clap/internal/overlay"
+	"github.com/Turbolet85/clip-clap/internal/toast"
 	"github.com/Turbolet85/clip-clap/internal/tray"
 )
 
@@ -299,6 +305,29 @@ func runMessagePump() {
 		// icon and menu remain usable even without an active hotkey.
 	}
 
+	// Register the AppUserModelID for Windows toast notifications. Done
+	// at startup (idempotent) rather than on first capture to avoid the
+	// latency hit when the user fires their first Ctrl+Shift+S.
+	if err := toast.RegisterAppUserModelID(toast.DefaultAppID); err != nil {
+		// Non-fatal — the app runs without toasts; flash + tooltip
+		// remain as primary feedback per design-system.
+		sanitized := tray.SanitizeForTray(err)
+		lasterror.Set(sanitized)
+		slog.Error("toast AppUserModelID registration failed",
+			"event", logger.EventToastError,
+			"error", sanitized.Error())
+	}
+
+	// Wire the tray menu handlers to their implementations. The handlers
+	// must be set BEFORE the pump starts so the first right-click gets
+	// correct behavior. SetHandlers accepts function pointers — no import
+	// cycle between tray and clipboard.
+	tray.SetHandlers(
+		func() { runCaptureFlow(hwnd) },
+		func() { runUndoFlow(hwnd) },
+		clipboard.HasSnapshot,
+	)
+
 	// Start the background "Last error" updater (Phase 2 stub; Phase 3
 	// may expand). Safe to call — internal goroutine exits when the
 	// process dies.
@@ -362,13 +391,14 @@ func wndProc(hwnd, msgCode, wparam, lparam uintptr) (ret uintptr) {
 
 	switch uint32(msgCode) {
 	case tray.WM_HOTKEY:
-		// Phase 2 placeholder: this debug emit confirms the hotkey-press
-		// wiring end-to-end. Phase 3 replaces EventHotKeyRegistered here
-		// with a capture.* event; until then, Phase 4 pytest MUST NOT
-		// use the event constant alone to distinguish press vs. register.
+		// WM_HOTKEY fires when the user presses the registered hotkey
+		// (wparam==1 is our hotkey ID). Spawn the capture flow on a
+		// background goroutine so the WndProc dispatch returns quickly
+		// — overlay.CreateOverlay must NOT block the message pump; the
+		// overlay uses its own WndProc running on the pump's thread via
+		// Windows dispatch.
 		if wparam == 1 {
-			slog.Debug("hotkey pressed",
-				"event", logger.EventHotKeyRegistered)
+			go runCaptureFlow(hwnd)
 		}
 		return 0
 	case tray.WM_COMMAND:
@@ -392,6 +422,74 @@ func wndProc(hwnd, msgCode, wparam, lparam uintptr) (ret uintptr) {
 		r, _, _ := procDefWindowProcW.Call(hwnd, msgCode, wparam, lparam)
 		return r
 	}
+}
+
+// runCaptureFlow is invoked on every WM_HOTKEY press AND on every "Expose"
+// menu-item click. Spawns the transparent overlay, waits for the user to
+// drag a rectangle (or press Esc), runs the full capture pipeline end-to-end,
+// and fires the 350ms safelight flash on success.
+//
+// All errors are non-fatal — they set `lasterror` via SanitizeForTray
+// (strips absolute paths) and are surfaced via the tray's "Last error"
+// menu slot. The message pump MUST NOT die on capture failures.
+func runCaptureFlow(hwnd uintptr) {
+	if mainCfg == nil {
+		return
+	}
+	err := overlay.CreateOverlay(func(rect image.Rectangle) {
+		// Run the pipeline: capture → clipboard → toast → tooltip → flash.
+		captureID, absPath, cerr := capture.Capture(rect, mainCfg.SaveFolder, time.Now)
+		if cerr != nil {
+			// capture.Capture already emitted capture.failed + set lasterror
+			// via SanitizeForTray. Nothing more to do.
+			return
+		}
+
+		// Clipboard swap with auto-quote per cfg.AutoQuotePaths.
+		clipText := clipboard.Quote(absPath, mainCfg.AutoQuotePaths)
+		if err := clipboard.Swap(clipText, captureID); err != nil {
+			sanitized := tray.SanitizeForTray(err)
+			lasterror.Set(sanitized)
+			slog.Error("clipboard swap failed",
+				"event", logger.EventCaptureFailed,
+				"capture_id", captureID,
+				"error", sanitized.Error())
+			return
+		}
+
+		// Toast notification (non-fatal — tray flash is primary receipt).
+		_ = toast.Show(absPath, captureID, mainCfg.SaveFolder)
+
+		// Update tray tooltip to "Last: <filename>".
+		filename := filepath.Base(absPath)
+		_ = tray.UpdateTooltipAfterCapture(hwnd, filename)
+
+		// Fire the signature 350ms safelight-amber flash.
+		_ = tray.Flash(hwnd)
+	})
+	if err != nil {
+		sanitized := tray.SanitizeForTray(err)
+		lasterror.Set(sanitized)
+		slog.Error("overlay create failed",
+			"event", logger.EventCaptureFailed,
+			"error", sanitized.Error())
+	}
+}
+
+// runUndoFlow restores the prior clipboard contents (via clipboard.Undo)
+// and reverts the tray tooltip to its idle state. Clears lasterror so the
+// next right-click shows "Last error: <none>".
+func runUndoFlow(hwnd uintptr) {
+	if err := clipboard.Undo(); err != nil {
+		sanitized := tray.SanitizeForTray(err)
+		lasterror.Set(sanitized)
+		slog.Error("clipboard undo failed",
+			"event", logger.EventClipboardUndo,
+			"error", sanitized.Error())
+		return
+	}
+	_ = tray.RevertTooltip(hwnd)
+	lasterror.Set(nil) // clear the "Last error" display
 }
 
 // main wraps run() so os.Exit only fires outside test contexts. syscall

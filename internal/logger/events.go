@@ -13,6 +13,7 @@ const (
 	EventClipboardUndo           = "clipboard.undo"
 	EventToastShown              = "toast.shown"
 	EventToastError              = "toast.error"
+	EventTrayFlashError          = "tray.flash.error"
 	EventHotKeyRegistered        = "hotkey.registered"
 	EventHotKeyError             = "hotkey.error"
 	EventTrayMenuOpened          = "tray.menu.opened"
