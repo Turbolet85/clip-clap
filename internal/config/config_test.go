@@ -7,32 +7,38 @@ import (
 	"testing"
 )
 
-// redirectUserConfigDir points os.UserConfigDir at the given dir for the
-// duration of the test, without mutating the real %APPDATA% / $XDG_CONFIG_HOME.
+// redirectUserHomeDir points os.UserHomeDir at the given dir for the
+// duration of the test, without mutating the real %USERPROFILE% / $HOME.
 // Using t.Setenv gives automatic restore on test cleanup.
-func redirectUserConfigDir(t *testing.T, dir string) {
+//
+// v1.0.8 note: default config path was moved from os.UserConfigDir
+// (AppData on Windows) to os.UserHomeDir + Pictures\clip-clap, so this
+// helper now redirects USERPROFILE / HOME instead of AppData /
+// XDG_CONFIG_HOME.
+func redirectUserHomeDir(t *testing.T, dir string) {
 	t.Helper()
-	t.Setenv("AppData", dir)         // Windows
-	t.Setenv("XDG_CONFIG_HOME", dir) // Linux
+	t.Setenv("USERPROFILE", dir) // Windows
+	t.Setenv("HOME", dir)        // Linux / macOS
 	// Clear env vars that would shadow the default-path auto-create flow.
 	t.Setenv("CLIP_CLAP_CONFIG", "")
 }
 
 // TestLoad_AutoCreateOnMissingFile — exercise the default-path auto-create
 // branch: when CLIP_CLAP_CONFIG is unset and the default config.toml under
-// %APPDATA%\clip-clap\ does not exist, Load writes a defaults file and decodes
-// it successfully. Covers AC #1. (CLIP_CLAP_CONFIG + missing file is covered
-// separately by TestLoad_CustomConfigMissingFile per AC #7 — those are two
-// different contracts per architecture §Config Management.)
+// %USERPROFILE%\Pictures\clip-clap\ does not exist, Load writes a defaults
+// file and decodes it successfully. Covers AC #1. (CLIP_CLAP_CONFIG +
+// missing file is covered separately by TestLoad_CustomConfigMissingFile
+// per AC #7 — those are two different contracts per architecture
+// §Config Management.)
 func TestLoad_AutoCreateOnMissingFile(t *testing.T) {
 	tmp := t.TempDir()
-	redirectUserConfigDir(t, tmp)
+	redirectUserHomeDir(t, tmp)
 
 	cfg, cfgPath, err := Load()
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	expectedPath := filepath.Join(tmp, "clip-clap", "config.toml")
+	expectedPath := filepath.Join(tmp, "Pictures", "clip-clap", "config.toml")
 	if cfgPath != expectedPath {
 		t.Errorf("cfgPath mismatch\n  want: %s\n  got:  %s", expectedPath, cfgPath)
 	}
