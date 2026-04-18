@@ -246,6 +246,13 @@ jobs:
     # Only publish on actual tag push; workflow_dispatch dry-runs are
     # meant to test the test-gate, not publish releases.
     if: startsWith(github.ref, 'refs/tags/v')
+    # GitHub's default GITHUB_TOKEN is read-only since 2023; `gh release
+    # create` needs contents:write to publish the release to the clip-clap
+    # repo. Scoped at the job level (principle of least privilege — test-*
+    # and build-release jobs stay read-only). Scoop-bucket pushes use the
+    # separate SCOOP_BUCKET_TOKEN PAT, not GITHUB_TOKEN.
+    permissions:
+      contents: write
     env:
       # SCOOP_BUCKET_TOKEN expires in ≤90 days; rotate before expiry.
       SCOOP_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
