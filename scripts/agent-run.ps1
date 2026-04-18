@@ -55,10 +55,20 @@ function startAgent {
         $exeArgs += '--agent-mode'
     }
 
+    # v1.0.8: clip-clap's default log path moved to
+    # %USERPROFILE%\Pictures\clip-clap\logs\agent-latest.jsonl. This harness
+    # expects logs in the CWD-relative ./logs/ for deterministic testing, so
+    # force the app to use our path via the CLIP_CLAP_LOG_PATH env var
+    # (inherited by Start-Process child). Without this, agent-run.ps1 logs
+    # command reads an empty CWD path while the real app log lives under
+    # USERPROFILE.
+    $absLogFile = Join-Path (Get-Location) $logFile
+    $env:CLIP_CLAP_LOG_PATH = $absLogFile
+
     Write-Host "Starting clip-clap.exe $($exeArgs -join ' ') (logs → $logFile)"
     $proc = Start-Process -FilePath './clip-clap.exe' `
                           -ArgumentList $exeArgs `
-                          -RedirectStandardOutput $logFile `
+                          -RedirectStandardOutput "$logFile.out" `
                           -RedirectStandardError "$logFile.err" `
                           -PassThru -NoNewWindow
     # PID file format: single decimal integer on one line, no trailing whitespace
