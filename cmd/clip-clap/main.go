@@ -543,6 +543,16 @@ func wndProc(hwnd, msgCode, wparam, lparam uintptr) (ret uintptr) {
 // (strips absolute paths) and are surfaced via the tray's "Last error"
 // menu slot. The message pump MUST NOT die on capture failures.
 func runCaptureFlow(hwnd uintptr) {
+	// Same thread-affinity requirement as runMessagePump: overlay.CreateOverlay
+	// calls CreateWindowExW + runs an internal GetMessage loop, and Win32
+	// requires both to happen on one OS thread. This goroutine was spawned
+	// via `go runCaptureFlow(hwnd)` from WM_HOTKEY / tray-menu dispatch, so
+	// without LockOSThread the Go scheduler can migrate it mid-flight and
+	// the overlay's message pump hangs (symptom: Ctrl+Shift+S freezes the
+	// process — shipped v1.0.1 field report).
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	if mainCfg == nil {
 		return
 	}
