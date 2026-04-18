@@ -428,16 +428,16 @@ func openConfigFile() {
 }
 
 // resolveConfigPath returns the absolute path to the user's config.toml
-// or empty string on failure. Mirrors the resolution logic used by
-// internal/config/config.Load but without reading or parsing the file —
-// we only need the location so the editor can open it.
+// or empty string on failure. Thin wrapper over config.DefaultDataDir
+// so tray's "Edit hotkey" menu item opens the SAME file that the
+// config loader reads at startup.
 func resolveConfigPath() string {
 	if v := os.Getenv("CLIP_CLAP_CONFIG"); v != "" {
 		return v
 	}
-	base, err := os.UserConfigDir()
+	dir, err := config.DefaultDataDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(base, "clip-clap", "config.toml")
+	return filepath.Join(dir, "config.toml")
 }

@@ -73,7 +73,15 @@ func Load() (*Config, string, error) {
 
 // resolveConfigPath returns (path, fromEnv, err). If CLIP_CLAP_CONFIG is set,
 // its value is validated and returned (fromEnv=true). Otherwise the default
-// %APPDATA%\clip-clap\config.toml is returned.
+// %USERPROFILE%\Pictures\clip-clap\config.toml is returned.
+//
+// v1.0.8 co-locates config.toml with screenshots (same directory as the
+// default save_folder) so users see it next to their captures instead of
+// hidden under %APPDATA%. Even if the user later points save_folder
+// elsewhere in config.toml, the config file itself stays in
+// Pictures\clip-clap\ — otherwise we'd have a chicken-and-egg problem
+// (can't read save_folder from config.toml if config.toml location
+// depends on save_folder).
 func resolveConfigPath() (string, bool, error) {
 	if v := os.Getenv("CLIP_CLAP_CONFIG"); v != "" {
 		if !filepath.IsAbs(v) {
@@ -84,11 +92,23 @@ func resolveConfigPath() (string, bool, error) {
 		}
 		return v, true, nil
 	}
-	base, err := os.UserConfigDir()
+	dir, err := DefaultDataDir()
 	if err != nil {
-		return "", false, fmt.Errorf("resolve user config dir: %w", err)
+		return "", false, err
 	}
-	return filepath.Join(base, "clip-clap", "config.toml"), false, nil
+	return filepath.Join(dir, "config.toml"), false, nil
+}
+
+// DefaultDataDir returns %USERPROFILE%\Pictures\clip-clap — the canonical
+// location for clip-clap's config.toml, logs/, and default save folder.
+// Exported so cmd/clip-clap/main.go can derive the default log path from
+// the same base as the config path (v1.0.8 colocation).
+func DefaultDataDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home dir: %w", err)
+	}
+	return filepath.Join(home, "Pictures", "clip-clap"), nil
 }
 
 // ensureConfigFile creates the default path with hardcoded defaults if it does
@@ -122,14 +142,21 @@ func ensureConfigFile(cfgPath string, fromEnv bool) error {
 // than the unexpanded `%USERPROFILE%` literal — keeps the config file readable
 // to the user who edits it later and avoids runtime env-var expansion in Load.
 func renderDefaultTOML() ([]byte, error) {
-	home, err := os.UserHomeDir()
+	dir, err := DefaultDataDir()
 	if err != nil {
-		return nil, fmt.Errorf("resolve user home dir: %w", err)
+		return nil, err
 	}
-	saveFolder := filepath.Join(home, "Pictures", "clip-clap") + string(filepath.Separator)
+	saveFolder := dir + string(filepath.Separator)
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "# clip-clap configuration — see architecture.md for full reference.\n")
-	fmt.Fprintf(&b, "# Edit by hand; strict mode rejects unknown keys (typos become config errors).\n\n")
+	fmt.Fprintf(&b, "# clip-clap configuration — edit by hand, restart to apply.\n")
+	fmt.Fprintf(&b, "# Strict mode rejects unknown keys (typos become startup errors).\n")
+	fmt.Fprintf(&b, "#\n")
+	fmt.Fprintf(&b, "# Hotkey format — CASE-SENSITIVE, capitalize only the first letter:\n")
+	fmt.Fprintf(&b, "#   Modifiers: Ctrl, Shift, Alt, Win  (rejected: ctrl, CTRL, ShIfT, etc.)\n")
+	fmt.Fprintf(&b, "#   Keys: A-Z, 0-9, F1-F12, Space, PageUp, PageDown, Home, End, Insert, Delete\n")
+	fmt.Fprintf(&b, "#   Combine with +, no spaces: Ctrl+Shift+S | Alt+F4 | Win+V | Ctrl+Shift+PageUp\n")
+	fmt.Fprintf(&b, "# If parsing fails, clip-clap logs hotkey.error at startup and runs\n")
+	fmt.Fprintf(&b, "# without an active hotkey (tray Expose still works).\n\n")
 	fmt.Fprintf(&b, "save_folder = %q\n", saveFolder)
 	fmt.Fprintf(&b, "hotkey = %q\n", defaultHotkey)
 	fmt.Fprintf(&b, "auto_quote_paths = %t\n", defaultAutoQuotePaths)

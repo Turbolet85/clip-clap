@@ -195,9 +195,21 @@ func run(args []string, stdout io.Writer) int {
 	if *debugFlag || cfg.LogLevel == "DEBUG" {
 		level = slog.LevelDebug
 	}
+	// v1.0.8: default log path lives under the canonical data dir
+	// (%USERPROFILE%\Pictures\clip-clap\logs\agent-latest.jsonl) — same
+	// directory as config.toml and default save_folder. Before v1.0.8
+	// the default was CWD-relative "logs/agent-latest.jsonl", which
+	// dumped logs next to whatever folder the user launched the .exe
+	// from (typically Desktop — messy).
 	logPath := os.Getenv("CLIP_CLAP_LOG_PATH")
 	if logPath == "" {
-		logPath = "logs/agent-latest.jsonl"
+		if dataDir, err := config.DefaultDataDir(); err == nil {
+			logPath = filepath.Join(dataDir, "logs", "agent-latest.jsonl")
+		} else {
+			// Fallback to CWD-relative if UserHomeDir fails (should not
+			// happen on Windows but defensive for unusual environments).
+			logPath = "logs/agent-latest.jsonl"
+		}
 	}
 	if err := logger.Initialize(level, logPath); err != nil {
 		fmt.Fprintf(os.Stderr, "logger initialization failed: %v\n", err)
